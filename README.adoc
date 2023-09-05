@@ -215,6 +215,14 @@ Version info is at the time of testing.
 |docker.io/mysql +
 (https://hub.docker.com/_/mysql)
 
+|MariaDB
+|11.1.2-MariaDB-1:11.1.2+maria~ubu2204
+|3.2.0
+|jdbc:mariadb://127.0.0.1:33306/sampledb +
+(root/passw0rd)
+|docker.io/mariadb +
+(https://hub.docker.com/_/mariadb)
+
 |===
 
 === Run commands
@@ -249,4 +257,10 @@ podman run -it --rm --name ifx -h ifx --privileged -e LICENSE=accept -p 9088:908
 
 ```
 podman run -it --rm -e MYSQL_ROOT_PASSWORD=passw0rd -e MYSQL_DATABASE=sampledb -p 3306:3306 docker.io/mysql --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+```
+
+* MariaDB
+
+```
+podman run -it --rm --name mariadb -e MARIADB_ROOT_PASSWORD=passw0rd -e MARIADB_DATABASE=sampledb -p 33306:3306 docker.io/mariadb:latest
 ```
