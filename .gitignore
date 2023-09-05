@@ -1,3 +1,9 @@
+jdbc-url.txt
+oracle.txt
+run-db.md
+.vscode/
+todo*
+
 target/
 pom.xml.tag
 pom.xml.releaseBackup

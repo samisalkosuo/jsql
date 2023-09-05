@@ -1,0 +1,238 @@
+= jsql
+
+Command line JDBC client to test JDBC connections and execute SQL statements.
+
+== Use case
+
+* Test that network connection works from client to database.
+* Execute simple SQL statements.
+
+== Build
+
+Build using Maven.
+
+```
+mvn package
+```
+
+== Sample commands
+
+=== Connect to database
+
+.JDBC URL, user name and password is given and connection is done to database.
+```
+java -jar .\target\jsql-1.0-SNAPSHOT-jar-with-dependencies.jar -j jdbc:db2://127.0.0.1:50000/sampledb -u db2inst1 -p passw0rd
+```
+
+.If connection is successful, basic information about the database is printed out.
+```
+Connection established successfully.
+Product name    : DB2/LINUXX8664
+Product version : SQL110580
+Database version: 11.5
+Driver name     : IBM Data Server Driver for JDBC and SQLJ
+Driver version  : 4.32.28
+JDBC URL        : jdbc:db2://127.0.0.1:50000/sampledb
+JDBC version    : 4.1
+User name       : db2inst1
+Connection closed.
+```
+
+=== List tables
+
+.Option -t lists all tables in the database
+```
+java -jar .\target\jsql-1.0-SNAPSHOT-jar-with-dependencies.jar -j jdbc:db2://127.0.0.1:50000/sampledb -u db2inst1 -p passw0rd -t
+```
+
+.Output of -t includes table names
+```
+Connection established successfully.
+Product name    : DB2/LINUXX8664
+Product version : SQL110580
+Database version: 11.5
+Driver name     : IBM Data Server Driver for JDBC and SQLJ
+Driver version  : 4.32.28
+JDBC URL        : jdbc:db2://127.0.0.1:50000/sampledb
+JDBC version    : 4.1
+User name       : db2inst1
+
+Tables:
+ADMINTABCOMPRESSINFO
+ADMINTABINFO
+ADMINTEMPCOLUMNS
+ADMINTEMPTABLES
+APPLICATIONS
+APPL_PERFORMANCE
+...
+<all table names>
+...
+Connection closed.
+```
+
+.Option -r is regex to filter table names.
+```
+java -jar .\target\jsql-1.0-SNAPSHOT-jar-with-dependencies.jar -j jdbc:db2://127.0.0.1:50000/sampledb -u db2inst1 -p passw0rd -t -r "^XS"
+```
+
+.Filtered table names output.
+```
+Connection established successfully.
+Product name    : DB2/LINUXX8664
+Product version : SQL110580
+Database version: 11.5
+Driver name     : IBM Data Server Driver for JDBC and SQLJ
+Driver version  : 4.32.28
+JDBC URL        : jdbc:db2://127.0.0.1:50000/sampledb
+JDBC version    : 4.1
+User name       : db2inst1
+
+Tables (^XS):
+XSROBJECTAUTH
+XSROBJECTCOMPONENTS
+XSROBJECTDEP
+XSROBJECTDETAILS
+XSROBJECTHIERARCHIES
+XSROBJECTS
+
+Connection closed.
+```
+
+=== Execute SQL
+
+.Create new table using -s option.
+```
+java -jar .\target\jsql-1.0-SNAPSHOT-jar-with-dependencies.jar -j jdbc:db2://127.0.0.1:50000/sampledb -u db2inst1 -p passw0rd   -s "create table mytable (cola int, colb varchar(8))"
+```
+
+.Create table output.
+```
+Connection established successfully.
+...
+<database info>
+...
+SQL:
+create table mytable (cola int, colb varchar(8))
+
+Result: 0
+
+Connection closed.
+```
+
+.Insert row using -s option.
+```
+java -jar .\target\jsql-1.0-SNAPSHOT-jar-with-dependencies.jar -j jdbc:db2://127.0.0.1:50000/sampledb -u db2inst1 -p passw0rd   -s "insert into mytable values (0,'hello')"
+```
+
+.Output of insert row command.
+```
+Connection established successfully.
+...
+<database info>
+...
+SQL:
+insert into mytable values (0,'hello')
+
+Result: 1
+
+Connection closed.
+```
+
+.Execute select statement.
+```
+java -jar .\target\jsql-1.0-SNAPSHOT-jar-with-dependencies.jar -j jdbc:db2://127.0.0.1:50000/sampledb -u db2inst1 -p passw0rd   -s "select * from mytable"
+```
+
+.Select statement output.
+```
+Connection established successfully.
+...
+<database info>
+...
+SQL:
+select * from mytable
+
+COLA,COLB
+0,hello
+0,world
+
+Connection closed.
+```
+
+== Databases 
+
+List of database whose JDBC drivers are included (see link:pom.xml[pom.xml]) and JDBC connection has been tested.
+
+The database that was tested was most likely running as a container (see the next section for run commands). The sample URL is the URL that was used when testing the connection.
+
+Version info is at the time of testing.
+
+
+.Databases 
+|===
+|Name|Version|JDBC driver version|Sample JDBC URL +
+(user name/password)|Image +
+(more info)
+
+|DB2/LINUXX8664
+|SQL110580
+|4.32.28
+|jdbc:db2://127.0.0.1:50000/testdb +
+(db2inst1/passw0rd)
+|icr.io/db2_community/db2 +
+(https://www.ibm.com/docs/en/db2/11.5?topic=deployments-db2-community-edition-docker)
+
+|PostgreSQL
+|15.4 (Debian 15.4-1.pgdg120+1)
+|42.6.0
+|jdbc:postgresql://localhost:5432/postgres +
+(admin/passw0rd)
+|docker.io/postgres +
+(https://github.com/docker-library/postgres)
+
+|Oracle
+|Oracle Database 23c Free, Release 23.0.0.0.0 - Developer-Release Version 23.2.0.0.0
+|23.2.0.0.0
+|jdbc:oracle:thin:@localhost:11521:free +
+(system/passw0rd)
+|container-registry.oracle.com/database/free:latest +
+(https://www.oracle.com/database/free/get-started/)
+
+
+|Informix Dynamic Server
+|14.10.FC9W1DE
+|4.50.JC4W1
+|jdbc:informix-sqli://localhost:9088/sysmaster +
+(informix/in4mix)
+|icr.io/informix/informix-developer-database +
+(https://github.com/informix/informix-dockerhub-readme)
+
+|===
+
+=== Run commands
+
+Run commands for database containers.
+
+* DB2
+
+```
+podman run -it --rm -h db2server --name db2server  --privileged=true -p  50000:50000 --env-file files/db2.env  icr.io/db2_community/db2
+```
+
+* PostgreSQL
+
+```
+podman run -it --rm -e POSTGRES_USER=admin -e POSTGRES_PASSWORD=passw0rd -p 5432:5432 --name postgresql docker.io/postgres
+```
+
+* Oracle
+
+```
+podman run -it --rm --name oracle  -p 11521:1521 -e ORACLE_PWD=passw0rd -e ORACLE_CHARACTERSET=UTF-8 container-registry.oracle.com/database/free:latest
+```
+
+* Informix
+
+```
+podman run -it --rm --name ifx -h ifx --privileged -e LICENSE=accept -p 9088:9088 -e STORAGE=local icr.io/informix/informix-developer-database
+```
