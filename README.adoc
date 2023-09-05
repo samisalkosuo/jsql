@@ -207,6 +207,14 @@ Version info is at the time of testing.
 |icr.io/informix/informix-developer-database +
 (https://github.com/informix/informix-dockerhub-readme)
 
+|MySQL
+|8.1.0
+|mysql-connector-j-8.1.0 (Revision: 7b6f9a337afe6ccb41823df485bf848ca7952b09)
+|jdbc:mysql://127.0.0.1:3306/sampledb +
+(root/passw0rd)
+|docker.io/mysql +
+(https://hub.docker.com/_/mysql)
+
 |===
 
 === Run commands
@@ -235,4 +243,10 @@ podman run -it --rm --name oracle  -p 11521:1521 -e ORACLE_PWD=passw0rd -e ORACL
 
 ```
 podman run -it --rm --name ifx -h ifx --privileged -e LICENSE=accept -p 9088:9088 -e STORAGE=local icr.io/informix/informix-developer-database
+```
+
+* MySQL
+
+```
+podman run -it --rm -e MYSQL_ROOT_PASSWORD=passw0rd -e MYSQL_DATABASE=sampledb -p 3306:3306 docker.io/mysql --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
 ```

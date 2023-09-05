@@ -223,6 +223,8 @@ class JSQLMain implements Callable<Integer> {
             Class.forName("org.postgresql.Driver");
             Class.forName("com.informix.jdbc.IfxDriver");
             Class.forName("oracle.jdbc.driver.OracleDriver");
+            Class.forName("com.mysql.cj.jdbc.Driver");
+            
         } catch (Exception e) {
             System.out.println("WARNING: " + e.toString());
         }
