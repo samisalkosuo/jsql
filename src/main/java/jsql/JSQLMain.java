@@ -225,7 +225,8 @@ class JSQLMain implements Callable<Integer> {
             Class.forName("oracle.jdbc.driver.OracleDriver");
             Class.forName("com.mysql.cj.jdbc.Driver");
             Class.forName("org.mariadb.jdbc.Driver");
-            
+            Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver");            
+
         } catch (Exception e) {
             System.out.println("WARNING: " + e.toString());
         }

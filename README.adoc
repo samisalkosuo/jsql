@@ -223,6 +223,14 @@ Version info is at the time of testing.
 |docker.io/mariadb +
 (https://hub.docker.com/_/mariadb)
 
+|Microsoft SQL Server
+|16.00.4065
+|12.4.1.0
+|jdbc:sqlserver://127.0.0.1:1434;integratedSecurity=false;encrypt=false;trustServerCertificate=false +
+(sa/MySTr0ng@Passw0rd)
+|mcr.microsoft.com/mssql/server:2022-latest +
+(https://learn.microsoft.com/en-us/sql/linux/quickstart-install-connect-docker)
+
 |===
 
 === Run commands
@@ -263,4 +271,10 @@ podman run -it --rm -e MYSQL_ROOT_PASSWORD=passw0rd -e MYSQL_DATABASE=sampledb -
 
 ```
 podman run -it --rm --name mariadb -e MARIADB_ROOT_PASSWORD=passw0rd -e MARIADB_DATABASE=sampledb -p 33306:3306 docker.io/mariadb:latest
+```
+
+* Microsoft SQL Server
+
+```
+podman run -it --rm -e "ACCEPT_EULA=Y" -e "MSSQL_SA_PASSWORD=MySTr0ng@Passw0rd" -p 1434:1433 --name sql1 --hostname sql1 mcr.microsoft.com/mssql/server:2022-latest
 ```
