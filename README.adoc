@@ -1,4 +1,5 @@
 = jsql
+:toc: left
 
 Command line JDBC client to test JDBC connections and execute SQL statements.
 
@@ -14,6 +15,9 @@ Build using Maven.
 ```
 mvn package
 ```
+
+Usage: see sample commands below.
+
 
 == Sample commands
 
@@ -159,7 +163,7 @@ COLA,COLB
 Connection closed.
 ```
 
-== Databases 
+== Databases and JDBC URLs
 
 List of database whose JDBC drivers are included (see link:pom.xml[pom.xml]) and JDBC connection has been tested.
 
@@ -170,70 +174,70 @@ Version info is at the time of testing.
 
 .Databases 
 |===
-|Name|Version|JDBC driver version|Sample JDBC URL +
-(user name/password)|Image +
+|Name|Sample JDBC URL +
+(user name/password)|Version|JDBC driver version|Image +
 (more info)
 
 |DB2/LINUXX8664
-|SQL110580
-|4.32.28
 |jdbc:db2://127.0.0.1:50000/testdb +
 (db2inst1/passw0rd)
+|SQL110580
+|4.32.28
 |icr.io/db2_community/db2 +
 (https://www.ibm.com/docs/en/db2/11.5?topic=deployments-db2-community-edition-docker)
 
 |PostgreSQL
-|15.4 (Debian 15.4-1.pgdg120+1)
-|42.6.0
 |jdbc:postgresql://localhost:5432/postgres +
 (admin/passw0rd)
+|15.4 (Debian 15.4-1.pgdg120+1)
+|42.6.0
 |docker.io/postgres +
 (https://github.com/docker-library/postgres)
 
 |Oracle
-|Oracle Database 23c Free, Release 23.0.0.0.0 - Developer-Release Version 23.2.0.0.0
-|23.2.0.0.0
 |jdbc:oracle:thin:@localhost:11521:free +
 (system/passw0rd)
+|Oracle Database 23c Free, Release 23.0.0.0.0 - Developer-Release Version 23.2.0.0.0
+|23.2.0.0.0
 |container-registry.oracle.com/database/free:latest +
 (https://www.oracle.com/database/free/get-started/)
 
 
 |Informix Dynamic Server
-|14.10.FC9W1DE
-|4.50.JC4W1
 |jdbc:informix-sqli://localhost:9088/sysmaster +
 (informix/in4mix)
+|14.10.FC9W1DE
+|4.50.JC4W1
 |icr.io/informix/informix-developer-database +
 (https://github.com/informix/informix-dockerhub-readme)
 
 |MySQL
-|8.1.0
-|mysql-connector-j-8.1.0 (Revision: 7b6f9a337afe6ccb41823df485bf848ca7952b09)
 |jdbc:mysql://127.0.0.1:3306/sampledb +
 (root/passw0rd)
+|8.1.0
+|mysql-connector-j-8.1.0 (Revision: 7b6f9a337afe6ccb41823df485bf848ca7952b09)
 |docker.io/mysql +
 (https://hub.docker.com/_/mysql)
 
 |MariaDB
-|11.1.2-MariaDB-1:11.1.2+maria~ubu2204
-|3.2.0
 |jdbc:mariadb://127.0.0.1:33306/sampledb +
 (root/passw0rd)
+|11.1.2-MariaDB-1:11.1.2+maria~ubu2204
+|3.2.0
 |docker.io/mariadb +
 (https://hub.docker.com/_/mariadb)
 
 |Microsoft SQL Server
-|16.00.4065
-|12.4.1.0
 |jdbc:sqlserver://127.0.0.1:1434;integratedSecurity=false;encrypt=false;trustServerCertificate=false +
 (sa/MySTr0ng@Passw0rd)
+|16.00.4065
+|12.4.1.0
 |mcr.microsoft.com/mssql/server:2022-latest +
 (https://learn.microsoft.com/en-us/sql/linux/quickstart-install-connect-docker)
 
 |===
 
-=== Run commands
+=== Database run commands
 
 Run commands for database containers.
 

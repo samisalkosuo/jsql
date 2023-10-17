@@ -3,6 +3,7 @@ oracle.txt
 run-db.md
 .vscode/
 todo*
+local/
 
 target/
 pom.xml.tag
