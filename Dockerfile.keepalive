@@ -10,4 +10,4 @@ FROM eclipse-temurin:24-jdk-ubi9-minimal
 WORKDIR /jsql
 COPY --from=build /project/target/jsql-1.0-SNAPSHOT-jar-with-dependencies.jar .
 
-CMD echo "jsql started. CTRL-D to exit." && cat
+CMD echo "jsql started." && tail -f /dev/null
