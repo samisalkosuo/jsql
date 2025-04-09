@@ -1,0 +1,19 @@
+name: jsql-keepalive container build and push
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - dev
+    paths:
+      - '!**.adoc'
+jobs:
+  db2-sample-db-container-build-and-push:
+    uses: ./.github/workflows/reusable-container-build-and-push.yaml
+    with:
+      imagename: kazhar/jsql-keepalive
+      tagname: $GITHUB_REF_NAME
+      dockerfile: Dockerfile.keepalive
+      directory: .
+    secrets: inherit
