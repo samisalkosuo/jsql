@@ -5,7 +5,7 @@ COPY src/ ./src/
 
 RUN mvn package
 
-FROM eclipse-temurin:17-alpine
+FROM eclipse-temurin:24-jdk-ubi9-minimal
 
 WORKDIR /jsql
 COPY --from=build /project/target/jsql-1.0-SNAPSHOT-jar-with-dependencies.jar .
