@@ -4,6 +4,7 @@ run-db.md
 .vscode/
 todo*
 local/
+effective-pom.xml
 
 target/
 pom.xml.tag
