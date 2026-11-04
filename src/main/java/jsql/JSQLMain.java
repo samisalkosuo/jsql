@@ -53,6 +53,10 @@ class JSQLMain implements Callable<Integer> {
             "--quiet" }, required = false, description = "Do not print output, except errors.")
     private boolean doNotPrintOutput = false;
 
+    @Option(names = { "-k",
+            "--insecure" }, required = false, description = "Accept all TLS/SSL certificates, including self-signed. Disables server certificate validation (insecure). Supported for Presto, SQL Server, PostgreSQL, MySQL and MariaDB.")
+    private boolean insecure = false;
+
     // returns status code
     @Override
     public Integer call() throws Exception {
@@ -76,14 +80,19 @@ class JSQLMain implements Callable<Integer> {
         Properties properties = new Properties();
         properties.put("user", userName);
         properties.put("password", userPassword);
-        properties.put("retreiveMessagesFromServerOnGetMessage", "true");
+        if (jdbcUrl.contains("db2") == true) {
+            properties.put("retreiveMessagesFromServerOnGetMessage", "true");
+        }
+        if (insecure == true) {
+            applyInsecureSsl(properties);
+        }
         // Get a connection
         try {
             Connection conn = DriverManager.getConnection(jdbcUrl, properties);
             DatabaseMetaData databaseMetaData = conn.getMetaData();
             println("Connection established successfully.");
 
-            printDatabaseInfo(databaseMetaData);
+           // printDatabaseInfo(databaseMetaData);
 
             if (printTables == true) {
                 printTables(databaseMetaData);
@@ -104,6 +113,27 @@ class JSQLMain implements Callable<Integer> {
                 System.out.println(e.toString());
             }
             return 1;
+        }
+    }
+
+    // Adds driver specific properties that disable server certificate validation.
+    private void applyInsecureSsl(Properties properties) {
+        String url = jdbcUrl.toLowerCase();
+        if (url.startsWith("jdbc:presto:") || url.startsWith("jdbc:trino:")) {
+            properties.putIfAbsent("SSL", "true");
+            properties.putIfAbsent("SSLVerification", "NONE");
+        } else if (url.startsWith("jdbc:sqlserver:")) {
+            properties.putIfAbsent("encrypt", "true");
+            properties.putIfAbsent("trustServerCertificate", "true");
+        } else if (url.startsWith("jdbc:postgresql:")) {
+            properties.putIfAbsent("ssl", "true");
+            properties.putIfAbsent("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
+        } else if (url.startsWith("jdbc:mysql:")) {
+            properties.putIfAbsent("sslMode", "REQUIRED");
+        } else if (url.startsWith("jdbc:mariadb:")) {
+            properties.putIfAbsent("sslMode", "trust");
+        } else {
+            println("WARNING: -k has no effect for this JDBC URL.");
         }
     }
 
@@ -195,7 +225,17 @@ class JSQLMain implements Callable<Integer> {
             while (rs.next()) {
                 ArrayList<String> columnValues = new ArrayList<String>();
                 for (int i = 0; i < columnCount; i++) {
-                    columnValues.add(rs.getObject(i + 1).toString());
+                    Object v = rs.getObject(i + 1);
+                    if (v != null)
+                    {
+                        columnValues.add(v.toString());
+                    }
+                    else 
+                    {
+                        columnValues.add("NULL");
+
+                    }
+                    
                 }
                 println(String.join(",", columnValues));
 
@@ -225,7 +265,8 @@ class JSQLMain implements Callable<Integer> {
             Class.forName("oracle.jdbc.driver.OracleDriver");
             Class.forName("com.mysql.cj.jdbc.Driver");
             Class.forName("org.mariadb.jdbc.Driver");
-            Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver");            
+            Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver");
+            Class.forName("com.facebook.presto.jdbc.PrestoDriver");
 
         } catch (Exception e) {
             System.out.println("WARNING: " + e.toString());
