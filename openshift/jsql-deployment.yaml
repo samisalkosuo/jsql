@@ -1,0 +1,21 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jsql-deployment
+  #namespace: jsql
+  labels:
+    app: jsql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jsql
+  template:
+    metadata:
+      labels:
+        app: jsql
+    spec:
+      containers:
+      - name: jsql
+        image: docker.io/kazhar/jsql-keepalive:latest
+        imagePullPolicy: Always

@@ -1,0 +1,19 @@
+name: jsql-mcp container build and push
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - dev
+    paths-ignore:
+      - '**.md'
+jobs:
+  jsql-mcp-container-build-and-push:
+    uses: ./.github/workflows/reusable-container-build-and-push.yaml
+    with:
+      imagename: kazhar/jsql-mcp
+      tagname: $GITHUB_REF_NAME
+      dockerfile: Dockerfile.mcp
+      directory: .
+    secrets: inherit

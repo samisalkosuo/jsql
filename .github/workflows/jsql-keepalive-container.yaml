@@ -6,8 +6,8 @@ on:
     branches:
       - main
       - dev
-    paths:
-      - '!**.adoc'
+    paths-ignore:
+      - '**.md'
 jobs:
   db2-sample-db-container-build-and-push:
     uses: ./.github/workflows/reusable-container-build-and-push.yaml

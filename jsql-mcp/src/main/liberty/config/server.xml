@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<server description="jsql MCP server">
+
+    <featureManager>
+        <feature>servlet-6.0</feature>
+        <feature>cdi-4.0</feature>
+        <feature>mcp-1.0</feature>
+        <!-- /health/live, /health/ready and /health/started for container probes -->
+        <feature>mpHealth-4.0</feature>
+    </featureManager>
+
+    <!-- Environment variables with the same name override these defaults. -->
+    <variable name="JSQL_HTTP_PORT" defaultValue="9080"/>
+
+    <!-- Plain HTTP. TLS, if wanted, is terminated in front of the container (route, ingress, proxy). -->
+    <httpEndpoint id="defaultHttpEndpoint" host="*" httpPort="${JSQL_HTTP_PORT}"/>
+
+    <!-- Endpoint is served at /mcp (context root "/").
+         Stateless: no MCP session is needed, so any replica can serve any request. -->
+    <webApplication id="jsql-mcp" contextRoot="/" location="jsql-mcp.war">
+        <mcp path="/mcp" stateless="true">
+            <info name="jsql" version="1.0" description="Investigate JDBC databases: schemas, tables, relationships, sample data and queries."/>
+        </mcp>
+    </webApplication>
+</server>

@@ -1,0 +1,28 @@
+# MCP server image (Open Liberty). Build from the repository root:
+#   podman build -f Dockerfile.mcp -t jsql-mcp .
+# Run:
+#   podman run --rm -p 9080:9080 -e JSQL_JDBC_URL=jdbc:postgresql://host:5432/db jsql-mcp
+# MCP endpoint: http://localhost:9080/mcp   Health: /health/live, /health/ready
+FROM docker.io/library/maven:3.9-eclipse-temurin-21 as build
+WORKDIR /project
+
+COPY pom.xml .
+COPY jsql-core/ ./jsql-core/
+COPY jsql-cli/pom.xml ./jsql-cli/pom.xml
+COPY jsql-mcp/ ./jsql-mcp/
+
+# jsql-cli is a module of the parent POM, but only its POM is needed to build jsql-mcp
+RUN mvn -B -q -pl jsql-mcp -am -DskipTests package
+
+FROM icr.io/appcafe/open-liberty:kernel-slim-java21-openj9-ubi-minimal
+
+COPY --chown=1001:0 jsql-mcp/src/main/liberty/config/server.xml /config/server.xml
+
+# Installs the features listed in server.xml
+RUN features.sh
+
+COPY --from=build --chown=1001:0 /project/jsql-mcp/target/jsql-mcp.war /config/apps/jsql-mcp.war
+
+RUN configure.sh
+
+EXPOSE 9080

@@ -1,0 +1,96 @@
+# jsql MCP server on OpenShift/Kubernetes.
+# NOT yet tested on a cluster (only the image was tested, with podman).
+#
+# Before applying, create the secret with the database settings, for example:
+#   oc create secret generic jsql-mcp-db \
+#     --from-literal=JSQL_JDBC_URL='jdbc:postgresql://dbhost:5432/mydb' \
+#     --from-literal=JSQL_USER_NAME='readonly_user' \
+#     --from-literal=JSQL_USER_PASSWORD='...'
+# JSQL_USER_NAME / JSQL_USER_PASSWORD are optional: they are the default account used when a
+# client sends no Authorization header. Leave them out to require every user to send their own.
+#
+# MCP client configuration (for example Bob):
+#   "jsql": { "type": "streamable-http", "url": "https://<route host>/mcp",
+#             "headers": { "Authorization": "Basic <base64 of user:password>" } }
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jsql-mcp
+  labels:
+    app: jsql-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jsql-mcp
+  template:
+    metadata:
+      labels:
+        app: jsql-mcp
+    spec:
+      containers:
+      - name: jsql-mcp
+        image: docker.io/kazhar/jsql-mcp:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9080
+          name: http
+        # All settings are environment variables. The secret holds JSQL_JDBC_URL and,
+        # optionally, the default account.
+        envFrom:
+        - secretRef:
+            name: jsql-mcp-db
+        env:
+        - name: JSQL_READ_ONLY
+          value: "false"
+        - name: JSQL_MAX_ROWS
+          value: "1000"
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        # Fails (and keeps traffic away) when the environment variables are invalid.
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: http
+          periodSeconds: 10
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jsql-mcp
+  labels:
+    app: jsql-mcp
+spec:
+  selector:
+    app: jsql-mcp
+  ports:
+  - name: http
+    port: 80
+    targetPort: http
+---
+# TLS is terminated by the route; the container itself speaks plain HTTP.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: jsql-mcp
+  labels:
+    app: jsql-mcp
+spec:
+  to:
+    kind: Service
+    name: jsql-mcp
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

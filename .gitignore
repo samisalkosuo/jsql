@@ -4,6 +4,8 @@ run-db.md
 .vscode/
 todo*
 local/
+plans/
+mcp.env
 effective-pom.xml
 
 target/

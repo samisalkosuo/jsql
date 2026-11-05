@@ -1,14 +1,18 @@
-FROM docker.io/kazhar/maven:latest as build
+FROM docker.io/library/maven:3.9-eclipse-temurin-21 as build
+WORKDIR /project
 
 COPY pom.xml .
-COPY src/ ./src/
+COPY jsql-core/ ./jsql-core/
+COPY jsql-cli/ ./jsql-cli/
+# jsql-mcp is a module of the parent POM, but only its POM is needed to build jsql-cli
+COPY jsql-mcp/pom.xml ./jsql-mcp/pom.xml
 
-RUN mvn package
+RUN mvn -pl jsql-cli -am package
 
 FROM eclipse-temurin:24-jdk-ubi9-minimal
 
 WORKDIR /jsql
-COPY --from=build /project/target/jsql-1.0-SNAPSHOT-jar-with-dependencies.jar .
+COPY --from=build /project/jsql-cli/target/jsql-1.0-SNAPSHOT-jar-with-dependencies.jar .
 
 ENTRYPOINT ["java", "-jar", "/jsql/jsql-1.0-SNAPSHOT-jar-with-dependencies.jar"]
 #CMD ["/bin/bash"]

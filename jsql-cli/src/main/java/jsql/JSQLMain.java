@@ -2,18 +2,14 @@ package jsql;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.Properties;
+import java.util.List;
 import java.util.concurrent.Callable;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
+import jsql.core.ConnectionSettings;
+import jsql.core.JdbcDrivers;
+import jsql.core.QueryExecutor;
+import jsql.core.TableLister;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -76,23 +72,14 @@ class JSQLMain implements Callable<Integer> {
             return 4;
         }
 
-        // Set user and password properties
-        Properties properties = new Properties();
-        properties.put("user", userName);
-        properties.put("password", userPassword);
-        if (jdbcUrl.contains("db2") == true) {
-            properties.put("retreiveMessagesFromServerOnGetMessage", "true");
-        }
-        if (insecure == true) {
-            applyInsecureSsl(properties);
-        }
+        ConnectionSettings settings = new ConnectionSettings(jdbcUrl, userName, userPassword, insecure);
+
         // Get a connection
-        try {
-            Connection conn = DriverManager.getConnection(jdbcUrl, properties);
+        try (Connection conn = settings.connect(this::println)) {
             DatabaseMetaData databaseMetaData = conn.getMetaData();
             println("Connection established successfully.");
 
-           // printDatabaseInfo(databaseMetaData);
+            // printDatabaseInfo(databaseMetaData);
 
             if (printTables == true) {
                 printTables(databaseMetaData);
@@ -101,10 +88,6 @@ class JSQLMain implements Callable<Integer> {
             if (sqlString != null && !sqlString.equals("")) {
                 executeSQL(conn);
             }
-
-            conn.close(); // close connection
-            println("Connection closed.");
-            return 0;
         } catch (Exception e) {
             if (printStackTrace == true) {
                 e.printStackTrace();
@@ -114,27 +97,8 @@ class JSQLMain implements Callable<Integer> {
             }
             return 1;
         }
-    }
-
-    // Adds driver specific properties that disable server certificate validation.
-    private void applyInsecureSsl(Properties properties) {
-        String url = jdbcUrl.toLowerCase();
-        if (url.startsWith("jdbc:presto:") || url.startsWith("jdbc:trino:")) {
-            properties.putIfAbsent("SSL", "true");
-            properties.putIfAbsent("SSLVerification", "NONE");
-        } else if (url.startsWith("jdbc:sqlserver:")) {
-            properties.putIfAbsent("encrypt", "true");
-            properties.putIfAbsent("trustServerCertificate", "true");
-        } else if (url.startsWith("jdbc:postgresql:")) {
-            properties.putIfAbsent("ssl", "true");
-            properties.putIfAbsent("sslfactory", "org.postgresql.ssl.NonValidatingFactory");
-        } else if (url.startsWith("jdbc:mysql:")) {
-            properties.putIfAbsent("sslMode", "REQUIRED");
-        } else if (url.startsWith("jdbc:mariadb:")) {
-            properties.putIfAbsent("sslMode", "trust");
-        } else {
-            println("WARNING: -k has no effect for this JDBC URL.");
-        }
+        println("Connection closed.");
+        return 0;
     }
 
     private void printDatabaseInfo(DatabaseMetaData databaseMetaData) throws SQLException {
@@ -159,42 +123,18 @@ class JSQLMain implements Callable<Integer> {
     }
 
     private void printTables(DatabaseMetaData databaseMetaData) throws SQLException {
-        String[] types = null;
-
         String headline = "\nTables:";
         if (regexString != null) {
             headline = "\nTables (" + regexString + "):";
         }
         System.out.println(headline);
-        // TABLE_TYPE String => table type. Typical types are "TABLE", "VIEW", "SYSTEM
-        // TABLE", "GLOBAL TEMPORARY", "LOCAL TEMPORARY", "ALIAS", "SYNONYM".
-        // Retrieving the columns in the database
-        ResultSet tables = databaseMetaData.getTables(null, null, "%", types);
-        ArrayList<String> tableList = new ArrayList<String>();
-        while (tables.next()) {
-            tableList.add(tables.getString(3));
 
-        }
+        List<String> tableList = TableLister.allTableNames(databaseMetaData);
         if (tableList.size() == 0) {
             println("No tables in the database.");
         } else {
-            Collections.sort(tableList);
-            Pattern p = null;
-            if (regexString != null) {
-                p = Pattern.compile(regexString);
-            }
-            for (String tableName : tableList) {
-                if (regexString != null) {
-
-                    Matcher m = p.matcher(tableName);
-                    if (m.find() == true) {
-                        println(tableName);
-                    }
-                } else {
-                    println(tableName);
-
-                }
-
+            for (String tableName : TableLister.filter(tableList, regexString)) {
+                println(tableName);
             }
         }
         println();
@@ -206,42 +146,22 @@ class JSQLMain implements Callable<Integer> {
         println("SQL:");
         println(sqlString);
         println();
-        Statement st = conn.createStatement();
-        st.execute(sqlString);
-        ResultSet rs = st.getResultSet();
-        if (rs == null) {
-            println("Result: " + st.getUpdateCount());
-        } else {
-            ResultSetMetaData rsmd = rs.getMetaData();
-            ArrayList<String> columnNames = new ArrayList<String>();
-            int columnCount = rsmd.getColumnCount();
-            for (int i = 0; i < columnCount; i++) {
-                columnNames.add(rsmd.getColumnName(i + 1));
-
+        QueryExecutor.execute(conn, sqlString, new QueryExecutor.Handler() {
+            @Override
+            public void columns(List<String> columnNames) {
+                println(String.join(",", columnNames));
             }
 
-            println(String.join(",", columnNames));
-
-            while (rs.next()) {
-                ArrayList<String> columnValues = new ArrayList<String>();
-                for (int i = 0; i < columnCount; i++) {
-                    Object v = rs.getObject(i + 1);
-                    if (v != null)
-                    {
-                        columnValues.add(v.toString());
-                    }
-                    else 
-                    {
-                        columnValues.add("NULL");
-
-                    }
-                    
-                }
-                println(String.join(",", columnValues));
-
+            @Override
+            public void row(List<String> values) {
+                println(String.join(",", values));
             }
-        }
-        st.close(); // close statement
+
+            @Override
+            public void updateCount(int updateCount) {
+                println("Result: " + updateCount);
+            }
+        });
         println();
 
     }
@@ -257,27 +177,10 @@ class JSQLMain implements Callable<Integer> {
 
     }
 
-    private void loadDrivers() {
-        try {
-            Class.forName("com.ibm.db2.jcc.DB2Jcc");
-            Class.forName("org.postgresql.Driver");
-            Class.forName("com.informix.jdbc.IfxDriver");
-            Class.forName("oracle.jdbc.driver.OracleDriver");
-            Class.forName("com.mysql.cj.jdbc.Driver");
-            Class.forName("org.mariadb.jdbc.Driver");
-            Class.forName("com.microsoft.sqlserver.jdbc.SQLServerDriver");
-            Class.forName("com.facebook.presto.jdbc.PrestoDriver");
-
-        } catch (Exception e) {
-            System.out.println("WARNING: " + e.toString());
-        }
-
-    }
-
     public static void main(String... args) {
 
         JSQLMain jsqlMain = new JSQLMain();
-        jsqlMain.loadDrivers();
+        JdbcDrivers.load(System.out::println);
         int exitCode = new CommandLine(jsqlMain).execute(args);
         if (exitCode == 2 || exitCode == 3 || exitCode == 4) {
             System.out.print("Usage: ");
