@@ -41,7 +41,7 @@ public class McpConfigTest {
         assertEquals(1000, c.limits().maxRows());
         assertEquals(60, c.limits().queryTimeoutSeconds());
         assertEquals(1000, c.limits().maxValueLength());
-        assertEquals(5, c.poolSize());
+        assertEquals(10, c.poolSize());
         assertEquals(600, c.poolIdleTtlSeconds());
         assertEquals(20, c.maxPools());
         assertEquals(30, c.connectTimeoutSeconds());

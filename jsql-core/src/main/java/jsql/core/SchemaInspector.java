@@ -41,6 +41,10 @@ public final class SchemaInspector {
     public record IndexInfo(String name, boolean unique, List<String> columns) {
     }
 
+    /**
+     * @param primaryKey null if it was not asked for
+     * @param indexes    null if they were not asked for
+     */
     public record TableDescription(TableInfo table, List<ColumnInfo> columns, List<String> primaryKey,
             List<IndexInfo> indexes) {
     }
@@ -101,16 +105,45 @@ public final class SchemaInspector {
      */
     public ListResult<TableInfo> listTables(Connection conn, String catalog, String schema, String namePattern,
             List<String> types) throws SQLException {
+        return listTables(conn, catalog, schema, namePattern, types, 0, maxItems);
+    }
+
+    /**
+     * Like {@link #listTables(Connection, String, String, String, List)}, one page at a time.
+     *
+     * @param offset how many matching tables to skip
+     * @param limit  page size, cut to the configured maximum
+     */
+    public ListResult<TableInfo> listTables(Connection conn, String catalog, String schema, String namePattern,
+            List<String> types, int offset, int limit) throws SQLException {
+        if (offset < 0) {
+            throw new InvalidRequestException("offset must not be negative.");
+        }
+        if (limit < 1) {
+            throw new InvalidRequestException("limit must be at least 1.");
+        }
+        int pageSize = Math.min(limit, maxItems);
         String[] typeArray = types == null || types.isEmpty() ? null : types.toArray(new String[0]);
+        String wantedCatalog = blankToNull(catalog);
         List<TableInfo> items = new ArrayList<>();
         boolean truncated = false;
-        try (ResultSet rs = conn.getMetaData().getTables(blankToNull(catalog), blankToNull(schema),
+        int skipped = 0;
+        try (ResultSet rs = conn.getMetaData().getTables(wantedCatalog, blankToNull(schema),
                 namePattern == null ? "%" : namePattern, typeArray)) {
             while (rs.next()) {
                 if (typeArray == null && isNoiseType(rs.getString("TABLE_TYPE"))) {
                     continue;
                 }
-                if (items.size() == maxItems) {
+                // Some drivers ignore the catalog argument: do not report other catalogs' tables.
+                String rowCatalog = rs.getString("TABLE_CAT");
+                if (wantedCatalog != null && rowCatalog != null && !wantedCatalog.equalsIgnoreCase(rowCatalog)) {
+                    continue;
+                }
+                if (skipped < offset) {
+                    skipped++;
+                    continue;
+                }
+                if (items.size() == pageSize) {
                     truncated = true;
                     break;
                 }
@@ -164,21 +197,36 @@ public final class SchemaInspector {
 
     public TableDescription describeTable(Connection conn, String catalog, String schema, String table)
             throws SQLException {
+        return describeTable(conn, catalog, schema, table, true, true);
+    }
+
+    /**
+     * Columns of a table and, on request, its primary key and indexes. Looking up indexes can be
+     * slow on large tables in some databases, which is why they are optional.
+     *
+     * @param includePrimaryKey false returns {@code null} as primary key
+     * @param includeIndexes    false returns {@code null} as indexes
+     */
+    public TableDescription describeTable(Connection conn, String catalog, String schema, String table,
+            boolean includePrimaryKey, boolean includeIndexes) throws SQLException {
         TableInfo info = resolveTable(conn, catalog, schema, table);
         TableRef ref = info.table();
         DatabaseMetaData md = conn.getMetaData();
 
         List<ColumnInfo> columns = columns(conn, ref);
 
-        List<String[]> pkParts = readOptional(() -> md.getPrimaryKeys(ref.catalog(), ref.schema(), ref.name()),
-                rs -> new String[] { String.format("%05d", rs.getShort("KEY_SEQ")), rs.getString("COLUMN_NAME") });
-        pkParts.sort(Comparator.comparing(p -> p[0]));
-        List<String> primaryKey = new ArrayList<>();
-        for (String[] p : pkParts) {
-            primaryKey.add(p[1]);
+        List<String> primaryKey = null;
+        if (includePrimaryKey) {
+            List<String[]> pkParts = readOptional(() -> md.getPrimaryKeys(ref.catalog(), ref.schema(), ref.name()),
+                    rs -> new String[] { String.format("%05d", rs.getShort("KEY_SEQ")), rs.getString("COLUMN_NAME") });
+            pkParts.sort(Comparator.comparing(p -> p[0]));
+            primaryKey = new ArrayList<>();
+            for (String[] p : pkParts) {
+                primaryKey.add(p[1]);
+            }
         }
 
-        List<IndexInfo> indexes = indexes(md, ref);
+        List<IndexInfo> indexes = includeIndexes ? indexes(md, ref) : null;
         return new TableDescription(info, columns, primaryKey, indexes);
     }
 

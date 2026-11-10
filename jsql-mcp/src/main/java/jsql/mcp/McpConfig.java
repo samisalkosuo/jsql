@@ -20,10 +20,19 @@ import jsql.core.QueryLimits;
  * JSQL_MAX_ROWS          1000      rows returned by one call
  * JSQL_QUERY_TIMEOUT     60        statement timeout in seconds, 0 = none
  * JSQL_MAX_VALUE_LENGTH  1000      characters returned per value
- * JSQL_POOL_SIZE         5         connections per pool (one pool per distinct account)
+ * JSQL_MAX_QUERY_TIMEOUT 3600      largest timeout_seconds a caller may ask for (larger values are cut), 0 = no limit
+ * JSQL_POOL_SIZE         10        connections per pool (one pool per distinct account)
  * JSQL_POOL_IDLE_TTL     600       seconds without use after which a pool is closed
  * JSQL_MAX_POOLS         20        pools (distinct accounts) open at the same time
- * JSQL_CONNECT_TIMEOUT   30        seconds to wait for a connection
+ * JSQL_CONNECT_TIMEOUT   30        seconds to wait for a connection from the pool
+ * JSQL_POOL_MAX_LIFETIME  1800      seconds after which a pooled connection is replaced
+ * JSQL_POOL_IDLE_TIMEOUT  600       seconds after which an unused pooled connection is closed
+ * JSQL_POOL_LEAK_DETECTION 0        log a warning when a connection is held longer than this many seconds, 0 = off
+ * JSQL_WATCHDOG_INTERVAL  30        seconds between watchdog runs
+ * JSQL_WATCHDOG_GRACE     60        seconds an operation may exceed JSQL_MAX_QUERY_TIMEOUT before the watchdog stops it
+ * JSQL_ADMIN_TOOLS_ENABLED false    register list_running_queries, cancel_query and reset_pool (also ADMIN_TOOLS_ENABLED)
+ * JSQL_DESCRIBE_INCLUDE_INDEXES false  describe_table returns indexes unless include_indexes says otherwise (also DESCRIBE_INCLUDE_INDEXES)
+ * JSQL_MAX_BATCH_QUERIES  10        queries accepted by one execute_batch call
  * </pre>
  *
  * The HTTP port is configured with JSQL_HTTP_PORT (default 9080) in the Liberty server.xml.
@@ -37,13 +46,23 @@ public final class McpConfig {
     private final int poolIdleTtlSeconds;
     private final int maxPools;
     private final int connectTimeoutSeconds;
+    private final int maxLifetimeSeconds;
+    private final int idleTimeoutSeconds;
+    private final int leakDetectionSeconds;
+    private final int watchdogIntervalSeconds;
+    private final int watchdogGraceSeconds;
+    private final boolean adminToolsEnabled;
+    private final boolean describeIncludeIndexes;
+    private final int maxBatchQueries;
     private final String exportDir;
     private final int maxExportRows;
     private final String savedQueriesDir;
     private final String annotationsFile;
 
     private McpConfig(Map<String, ConnectionConfig> connections, String defaultConnectionName, QueryLimits limits,
-            int poolSize, int poolIdleTtlSeconds, int maxPools, int connectTimeoutSeconds, String exportDir,
+            int poolSize, int poolIdleTtlSeconds, int maxPools, int connectTimeoutSeconds, int maxLifetimeSeconds,
+            int idleTimeoutSeconds, int leakDetectionSeconds, int watchdogIntervalSeconds, int watchdogGraceSeconds,
+            boolean adminToolsEnabled, boolean describeIncludeIndexes, int maxBatchQueries, String exportDir,
             int maxExportRows, String savedQueriesDir, String annotationsFile) {
         this.connections = Map.copyOf(connections);
         this.defaultConnectionName = defaultConnectionName;
@@ -52,6 +71,14 @@ public final class McpConfig {
         this.poolIdleTtlSeconds = poolIdleTtlSeconds;
         this.maxPools = maxPools;
         this.connectTimeoutSeconds = connectTimeoutSeconds;
+        this.maxLifetimeSeconds = maxLifetimeSeconds;
+        this.idleTimeoutSeconds = idleTimeoutSeconds;
+        this.leakDetectionSeconds = leakDetectionSeconds;
+        this.watchdogIntervalSeconds = watchdogIntervalSeconds;
+        this.watchdogGraceSeconds = watchdogGraceSeconds;
+        this.adminToolsEnabled = adminToolsEnabled;
+        this.describeIncludeIndexes = describeIncludeIndexes;
+        this.maxBatchQueries = maxBatchQueries;
         this.exportDir = exportDir;
         this.maxExportRows = maxExportRows;
         this.savedQueriesDir = savedQueriesDir;
@@ -69,6 +96,8 @@ public final class McpConfig {
         Map<String, ConnectionConfig> connections = new java.util.LinkedHashMap<>();
         String defaultName = null;
 
+        boolean insecure = bool(env, "JSQL_INSECURE", false, problems);
+        boolean readOnly = boolWithFallback(env, "JSQL_READ_ONLY", "READ_ONLY", true, problems);
         String primaryUrl = text(env, "JSQL_JDBC_URL");
         if (primaryUrl != null) {
             if (!primaryUrl.startsWith("jdbc:")) {
@@ -84,8 +113,6 @@ public final class McpConfig {
             } else if (user != null) {
                 defaults = new Credentials(user, password);
             }
-            boolean insecure = bool(env, "JSQL_INSECURE", false, problems);
-            boolean readOnly = boolWithFallback(env, "JSQL_READ_ONLY", "READ_ONLY", true, problems);
             ConnectionConfig primary = new ConnectionConfig("default", primaryUrl, defaults, insecure, readOnly, true);
             connections.put("default", primary);
             defaultName = "default";
@@ -131,10 +158,26 @@ public final class McpConfig {
         int queryTimeout = integer(env, "JSQL_QUERY_TIMEOUT", 60, 0, 3600, problems);
         int maxQueryTimeout = integer(env, "JSQL_MAX_QUERY_TIMEOUT", 3600, 0, 86_400, problems);
         int maxValueLength = integer(env, "JSQL_MAX_VALUE_LENGTH", 1000, 1, 100_000, problems);
-        int poolSize = integer(env, "JSQL_POOL_SIZE", 5, 1, 100, problems);
+        int poolSize = integer(env, "JSQL_POOL_SIZE", 10, 1, 100, problems);
         int idleTtl = integer(env, "JSQL_POOL_IDLE_TTL", 600, 1, 86_400, problems);
         int maxPools = integer(env, "JSQL_MAX_POOLS", 20, 1, 1000, problems);
         int connectTimeout = integer(env, "JSQL_CONNECT_TIMEOUT", 30, 1, 300, problems);
+        int maxLifetime = integer(env, "JSQL_POOL_MAX_LIFETIME", 1800, 30, 86_400, problems);
+        int idleTimeout = integer(env, "JSQL_POOL_IDLE_TIMEOUT", 600, 10, 86_400, problems);
+        if (idleTimeout >= maxLifetime) {
+            problems.add("JSQL_POOL_IDLE_TIMEOUT (" + idleTimeout + ") must be smaller than JSQL_POOL_MAX_LIFETIME ("
+                    + maxLifetime + ")");
+        }
+        int leakDetection = integer(env, "JSQL_POOL_LEAK_DETECTION", 0, 0, 3600, problems);
+        if (leakDetection == 1) {
+            problems.add("JSQL_POOL_LEAK_DETECTION must be 0 (off) or at least 2, but is 1");
+        }
+        int watchdogInterval = integer(env, "JSQL_WATCHDOG_INTERVAL", 30, 1, 3600, problems);
+        int watchdogGrace = integer(env, "JSQL_WATCHDOG_GRACE", 60, 0, 3600, problems);
+        boolean adminTools = boolWithFallback(env, "JSQL_ADMIN_TOOLS_ENABLED", "ADMIN_TOOLS_ENABLED", false, problems);
+        boolean describeIndexes = boolWithFallback(env, "JSQL_DESCRIBE_INCLUDE_INDEXES", "DESCRIBE_INCLUDE_INDEXES",
+                false, problems);
+        int maxBatch = integer(env, "JSQL_MAX_BATCH_QUERIES", 10, 1, 100, problems);
 
         String exportDir = text(env, "JSQL_EXPORT_DIR");
         if (exportDir == null) {
@@ -166,7 +209,8 @@ public final class McpConfig {
         }
         return new McpConfig(connections, defaultName,
                 new QueryLimits(maxRows, queryTimeout, maxValueLength, maxQueryTimeout), poolSize, idleTtl, maxPools,
-                connectTimeout, exportDir, maxExportRows, savedQueriesDir, annotationsFile);
+                connectTimeout, maxLifetime, idleTimeout, leakDetection, watchdogInterval, watchdogGrace, adminTools,
+                describeIndexes, maxBatch, exportDir, maxExportRows, savedQueriesDir, annotationsFile);
     }
 
     private static String text(Map<String, String> env, String name) {
@@ -293,6 +337,39 @@ public final class McpConfig {
 
     public int connectTimeoutSeconds() {
         return connectTimeoutSeconds;
+    }
+
+    public int maxLifetimeSeconds() {
+        return maxLifetimeSeconds;
+    }
+
+    public int idleTimeoutSeconds() {
+        return idleTimeoutSeconds;
+    }
+
+    /** 0 means leak detection is off. */
+    public int leakDetectionSeconds() {
+        return leakDetectionSeconds;
+    }
+
+    public int watchdogIntervalSeconds() {
+        return watchdogIntervalSeconds;
+    }
+
+    public int watchdogGraceSeconds() {
+        return watchdogGraceSeconds;
+    }
+
+    public boolean adminToolsEnabled() {
+        return adminToolsEnabled;
+    }
+
+    public boolean describeIncludeIndexes() {
+        return describeIncludeIndexes;
+    }
+
+    public int maxBatchQueries() {
+        return maxBatchQueries;
     }
 
     public String exportDir() {

@@ -13,6 +13,7 @@ import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.servlet.http.HttpServletRequest;
 import jsql.core.QueryLimits;
+import jsql.mcp.DbAccess.Call;
 
 /**
  * Tool that tells the client what it is connected to. It also checks the credentials of the
@@ -35,12 +36,13 @@ public class ServerInfoTool {
             + "(product, version, driver), which database account is used for this connection, and the limits and "
             + "mode (read-only or not) in effect. Call this first: it also verifies that the credentials work.", annotations = @Tool.Annotations(readOnlyHint = true))
     public String serverInfo(
+            @ToolArg(name = "timeout_seconds", description = "Timeout in seconds. Omit for the server default; larger values are cut to the server maximum.", required = false) Integer timeoutSeconds,
             @ToolArg(name = "connection", description = "Named connection to check. Omit for default.", required = false) String connection) {
-        return info(request != null ? request.getHeader("Authorization") : null, connection);
+        return info(request != null ? request.getHeader("Authorization") : null, connection, timeoutSeconds);
     }
 
     public String serverInfo() {
-        return serverInfo(null);
+        return serverInfo(null, null);
     }
 
     String info(String authorization) {
@@ -48,7 +50,11 @@ public class ServerInfoTool {
     }
 
     String info(String authorization, String connection) {
-        return db.run(connection, authorization, conn -> {
+        return info(authorization, connection, null);
+    }
+
+    String info(String authorization, String connection, Integer timeoutSeconds) {
+        return db.run(Call.of("server_info", timeoutSeconds), connection, authorization, conn -> {
             DatabaseMetaData md = conn.getMetaData();
             McpConfig config = state.config();
             ConnectionConfig connConfig = config.connection(connection);
@@ -73,10 +79,18 @@ public class ServerInfoTool {
                     .add("queryTimeoutSeconds", limits.queryTimeoutSeconds())
                     .add("maxQueryTimeoutSeconds", limits.maxQueryTimeoutSeconds())
                     .add("maxValueLength", limits.maxValueLength())
-                    .add("exportDir", config.exportDir());
+                    .add("exportDir", config.exportDir())
+                    .add("adminToolsEnabled", config.adminToolsEnabled())
+                    .add("pools", poolSummary());
             JsonObject json = server.build();
             return json.toString();
         });
+    }
+
+    private JsonArrayBuilder poolSummary() {
+        JsonArrayBuilder pools = Json.createArrayBuilder();
+        state.pools().status().forEach(p -> pools.add(ToolJson.pool(p)));
+        return pools;
     }
 
     private static String nullToEmpty(String s) {

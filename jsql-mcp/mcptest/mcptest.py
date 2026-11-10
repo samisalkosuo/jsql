@@ -25,10 +25,15 @@ from mcp.client.streamable_http import streamable_http_client
 
 DEFAULT_URL = "http://localhost:9080/mcp"
 
+# The administrator tools (list_running_queries, cancel_query, reset_pool) exist only when the
+# server runs with ADMIN_TOOLS_ENABLED=true, so they are not expected here.
 EXPECTED_TOOLS = {
-    "server_info", "list_databases", "list_schemas", "list_tables", "describe_table",
-    "search_schema", "get_relationships", "sample_rows", "execute_query", "profile_column",
-    "validate_sql", "explain_query",
+    "server_info", "list_connections", "list_databases", "list_schemas", "list_tables", "find_table",
+    "describe_table", "search_schema", "get_relationships", "sample_rows", "execute_query",
+    "execute_batch", "export_query_to_file", "list_exports", "read_export", "delete_export",
+    "get_row_count", "get_table_stats", "list_saved_queries", "get_saved_query", "run_saved_query",
+    "save_query", "delete_saved_query", "profile_column", "validate_sql", "explain_query",
+    "pool_status", "get_query_history",
 }
 
 

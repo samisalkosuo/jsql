@@ -2,6 +2,7 @@ package jsql.core;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -307,6 +308,85 @@ public class CoreServicesTest {
         QueryService small = new QueryService(new QueryLimits(1, 30, 50), false);
         assertEquals(1, small.sampleRows(conn, null, null, "customers", 50).rows().size());
     }
+    // ---- timeouts, paging, describe flags, stats -----------------------------------------------
+
+    @Test
+    public void effectiveTimeoutUsesDefaultClampsAndRejectsNonPositive() {
+        QueryLimits l = new QueryLimits(100, 30, 50, 120);
+        assertEquals(30, l.effectiveTimeout(null));
+        assertEquals(10, l.effectiveTimeout(10));
+        assertEquals(120, l.effectiveTimeout(100_000));
+        for (int bad : new int[] { 0, -1 }) {
+            try {
+                l.effectiveTimeout(bad);
+                fail("expected rejection of " + bad);
+            } catch (InvalidRequestException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains("at least 1"));
+            }
+        }
+    }
+
+    @Test
+    public void listTablesPagesThroughManyTables() throws Exception {
+        for (int i = 0; i < 500; i++) {
+            exec("create table pg_t" + String.format("%03d", i) + " (id int)");
+        }
+        SchemaInspector wide = new SchemaInspector(new QueryLimits(1000, 30, 50));
+        ListResult<TableInfo> first = wide.listTables(conn, null, null, "PG_T%", null, 0, 200);
+        assertEquals(200, first.items().size());
+        assertTrue(first.truncated());
+        ListResult<TableInfo> second = wide.listTables(conn, null, null, "PG_T%", null, 200, 200);
+        assertEquals(200, second.items().size());
+        assertTrue(second.truncated());
+        ListResult<TableInfo> last = wide.listTables(conn, null, null, "PG_T%", null, 400, 200);
+        assertEquals(100, last.items().size());
+        assertFalse(last.truncated());
+        assertNotEquals(first.items().get(0).table().name(), second.items().get(0).table().name());
+    }
+
+    @Test
+    public void listTablesRejectsBadPaging() throws Exception {
+        try {
+            inspector.listTables(conn, null, null, null, null, -1, 10);
+            fail();
+        } catch (InvalidRequestException e) {
+            assertTrue(e.getMessage().contains("offset"));
+        }
+        try {
+            inspector.listTables(conn, null, null, null, null, 0, 0);
+            fail();
+        } catch (InvalidRequestException e) {
+            assertTrue(e.getMessage().contains("limit"));
+        }
+    }
+
+    @Test
+    public void listTablesWithUnknownCatalogIsEmpty() throws Exception {
+        assertTrue(inspector.listTables(conn, "NO_SUCH_CATALOG", null, null, null).items().isEmpty());
+    }
+
+    @Test
+    public void describeTableLeavesOutKeyAndIndexesWhenNotRequested() throws Exception {
+        TableDescription fast = inspector.describeTable(conn, null, null, "customers", false, false);
+        assertEquals(4, fast.columns().size());
+        assertNull(fast.indexes());
+        assertNull(fast.primaryKey());
+        TableDescription withPk = inspector.describeTable(conn, null, null, "customers", true, false);
+        assertNull(withPk.indexes());
+        assertEquals(List.of("ID"), withPk.primaryKey());
+        TableDescription full = inspector.describeTable(conn, null, null, "customers");
+        assertFalse(full.indexes().isEmpty());
+    }
+
+    @Test
+    public void tableStatsAreNotSupportedOnH2() throws Exception {
+        QueryService.TableStats stats = query.tableStats(conn, null, null, "customers", null);
+        assertFalse(stats.supported());
+        assertNotNull(stats.hint());
+        assertTrue(stats.columns().isEmpty());
+    }
+
+
 
     @Test
     public void sampleRowsOfUnknownTableFails() throws Exception {

@@ -210,19 +210,30 @@ The MCP server lets an AI tool (for example Bob) investigate a database that you
 
 | Tool | What it does |
 |---|---|
-| `server_info` | Which database and driver the server is connected to, which account is used, read-only mode and limits. Also checks the credentials, so call it first. |
+| `server_info` | Which database and driver the server is connected to, which account is used, read-only mode, limits and a short pool summary. Also checks the credentials, so call it first. |
+| `list_connections` | The named connections of the server. |
 | `list_databases` | Catalogs (databases) visible on the connection. Often empty or a single entry. |
 | `list_schemas` | Schemas. The usual starting point. |
-| `list_tables` | Tables and views, filtered by schema, name pattern (`%`, `_`) and type. Indexes, sequences and system objects are left out unless asked for with `types`. |
-| `describe_table` | Columns (type, size, nullable, default, comment), primary key and indexes. |
+| `list_tables` | Tables and views, filtered by schema, name pattern (`%`, `_`) and type, one page at a time (`limit` default 200, `offset`). When `truncated` is true, call again with `offset` set to `next_offset`. Indexes, sequences and system objects are left out unless asked for with `types`. |
+| `find_table` | Tables by name pattern across all connections or one connection, optionally limited to one catalog (`database`). |
+| `describe_table` | Columns (type, size, nullable, default, comment) and primary key. Indexes only with `include_indexes=true` (or `DESCRIBE_INCLUDE_INDEXES=true`), because the index lookup can be very slow on large tables. `columns_only=true` never looks up indexes. |
 | `search_schema` | Tables and columns whose name matches a case-insensitive regular expression. |
 | `get_relationships` | Foreign keys of a table: `references` (points to) and `referencedBy` (pointed to by). |
 | `sample_rows` | The first rows of a table or view (not a random sample). |
 | `execute_query` | Runs one SQL statement. Rows are limited and marked `truncated`. |
+| `execute_batch` | Runs up to 10 statements (`JSQL_MAX_BATCH_QUERIES`) one after the other. Every item has its own result or error, so one failing statement does not hide the others. |
+| `export_query_to_file` | Writes the rows of a query to a CSV or JSON file in the export directory. |
+| `list_exports`, `read_export`, `delete_export` | List the files in the export directory, read one in chunks (at most 256 KB per call; follow `next_offset` until `eof` is true) and delete one. |
+| `get_row_count` | Number of rows of a table. |
+| `get_table_stats` | Row count and column statistics from the database's own statistics, without scanning the table. Presto/Trino only (`SHOW STATS FOR`); other databases return `"supported": false` with a hint. |
+| `list_saved_queries`, `get_saved_query`, `run_saved_query`, `save_query`, `delete_saved_query` | Reusable queries with `:name` parameters, stored as files in the saved queries directory. Names may contain only letters, numbers, hyphens and underscores. `delete_saved_query` returns `deleted: true` or `false`. |
 | `profile_column` | Row, null and distinct counts, min, max and most frequent values of one column. Scans the table several times, so use it with care on large tables. |
 | `validate_sql` | Asks the database to parse a statement without running it. Returns the result columns and parameter count, or the database's error. |
 | `explain_query` | Execution plan of a statement, without running it. PostgreSQL, MySQL, MariaDB, H2, Presto/Trino and Oracle. Db2, SQL Server and Informix have no plain-SQL explain and return an error that says so. |
+| `pool_status` | Per connection pool: total, active, idle and waiting connections, the pool size and the age of the oldest running operation. |
+| `get_query_history` | The last operations (default 50, at most 200): time, tool, state (`ok`, `error`, `timeout`, `cancelled`), elapsed time, row count and a hash of the SQL. The SQL text is not kept. The history is in memory and is lost at restart. |
 
+Administrator tools exist only when `ADMIN_TOOLS_ENABLED=true`; see [Administrator tools](#administrator-tools).
 Results are compact JSON text. Rows are arrays in column order, SQL NULL is JSON `null`. Long text is cut and ends in `...[truncated]`, binary values are shown as `<BLOB 12 bytes>` or `<binary 12 bytes>`. A list that was cut at the row limit has `"truncated": true`.
 
 Table and schema names are matched as typed. If nothing is found, the upper case and lower case forms are tried, because databases fold case differently. An ambiguous table name (the same name in several schemas) returns an error that lists the candidates.
@@ -258,14 +269,49 @@ Health checks for container platforms: `/health/live` (the server runs) and `/he
 | `JSQL_USER_NAME`, `JSQL_USER_PASSWORD` | (none) | Optional default account, used when a request has no `Authorization` header. Both or neither. Same names as in the CLI. |
 | `JSQL_READ_ONLY` | `false` | `true` rejects statements that are not reads and sets the connection read-only. See [Security notes](#security-notes). |
 | `JSQL_MAX_ROWS` | `1000` | Rows (or list entries) returned by one call, 1 to 100000. |
-| `JSQL_QUERY_TIMEOUT` | `60` | Statement timeout in seconds, 0 for none. |
+| `JSQL_QUERY_TIMEOUT` | `60` | Default statement timeout in seconds, 0 for none. |
+| `JSQL_MAX_QUERY_TIMEOUT` | `3600` | Upper limit of the `timeout_seconds` argument of the tools. Larger values are cut to this and the answer shows `effectiveTimeoutSeconds`. |
 | `JSQL_MAX_VALUE_LENGTH` | `1000` | Characters returned per value. Longer text is cut. |
 | `JSQL_INSECURE` | `false` | Accept any TLS certificate of the database. Same effect and same supported drivers as CLI option `-k`. Testing only. |
-| `JSQL_POOL_SIZE` | `5` | Connections per connection pool. |
+| `JSQL_POOL_SIZE` | `10` | Connections per connection pool. |
 | `JSQL_POOL_IDLE_TTL` | `600` | Seconds without use after which a pool is closed. |
 | `JSQL_MAX_POOLS` | `20` | Pools (distinct accounts) open at the same time. |
-| `JSQL_CONNECT_TIMEOUT` | `30` | Seconds to wait for a database connection. |
+| `JSQL_CONNECT_TIMEOUT` | `30` | Seconds to wait for a database connection (the acquisition timeout). |
+| `JSQL_POOL_MAX_LIFETIME` | `1800` | Seconds after which a pooled connection is replaced. |
+| `JSQL_POOL_IDLE_TIMEOUT` | `600` | Seconds after which an unused pooled connection is closed. Must be smaller than the maximum lifetime. |
+| `JSQL_POOL_LEAK_DETECTION` | `0` | Seconds a connection may be borrowed before the pool logs a warning. 0 is off. |
+| `JSQL_WATCHDOG_INTERVAL` | `30` | Seconds between checks for operations that run too long. |
+| `JSQL_WATCHDOG_GRACE` | `60` | Seconds added to `JSQL_MAX_QUERY_TIMEOUT` before the watchdog stops an operation and closes its connection. |
+| `ADMIN_TOOLS_ENABLED` | `false` | `true` registers the [administrator tools](#administrator-tools). `JSQL_ADMIN_TOOLS_ENABLED` is the same setting. |
+| `DESCRIBE_INCLUDE_INDEXES` | `false` | `true` makes `describe_table` return indexes unless the call says otherwise. `JSQL_DESCRIBE_INCLUDE_INDEXES` is the same setting. |
+| `JSQL_MAX_BATCH_QUERIES` | `10` | Statements allowed in one `execute_batch` call. |
 | `JSQL_HTTP_PORT` | `9080` | HTTP port inside the container. |
+
+### Timeouts and stuck calls
+
+Every tool that talks to the database has an optional `timeout_seconds`. Zero and negative values are rejected, and values above `JSQL_MAX_QUERY_TIMEOUT` are cut to it. The answer of `execute_query`, `execute_batch` and `run_saved_query` contains `effectiveTimeoutSeconds`.
+
+A call runs on a worker thread with a deadline, also metadata calls such as `describe_table` or `list_tables`, which a database can block for a long time. When the deadline passes the server interrupts the worker, aborts the connection, removes it from the pool and returns
+
+```json
+{"error": "...", "error_type": "timeout", "elapsed_ms": 30012, "hint": "..."}
+```
+
+so a stuck call cannot use up the pool. A watchdog does the same for any operation that is still running after `JSQL_MAX_QUERY_TIMEOUT` plus `JSQL_WATCHDOG_GRACE` seconds. `pool_status` shows the counters.
+
+The server runs the MCP endpoint in stateless mode (Open Liberty ignores client cancellation requests in that mode). A client cannot cancel a running call; the deadline, the watchdog and the administrator tools are what stop it.
+
+### Administrator tools
+
+With `ADMIN_TOOLS_ENABLED=true` the server also registers:
+
+| Tool | What it does |
+|---|---|
+| `list_running_queries` | The operations that run now: `query_id`, connection, tool, shortened SQL and elapsed seconds. |
+| `cancel_query` | Stops one operation by `query_id`: its worker is interrupted and its connection is closed. |
+| `reset_pool` | `connection` (optional) and `force` (default false). Without `force`, idle connections are closed and busy ones are replaced when they are returned. With `force`, running operations are stopped and the pool is closed; the next request opens a new one. Returns the pool status before and after. |
+
+Without the flag these tools do not exist: they are not in the tool list and calling them fails as an unknown tool. Anyone who can reach the endpoint can use them, so enable them only where the endpoint is protected.
 
 ### Accounts and connection pooling
 
@@ -354,6 +400,12 @@ The secret's user name and password are optional; leave them out to make every u
 * The server has no login of its own. Anyone who can reach the endpoint can try database logins (the database's own lockout rules apply). Keep the endpoint inside the network, or protect it with the route, network policy or proxy that suits the database.
 * Passwords in the `Authorization` header are not logged. The JDBC URL shown by `server_info` and in the log has passwords removed (`password=***`).
 * Row, time and value limits (`JSQL_MAX_ROWS`, `JSQL_QUERY_TIMEOUT`, `JSQL_MAX_VALUE_LENGTH`) protect the server and the model's context window, not the data.
+* The export tools only reach files inside the export directory. Absolute paths, `..` and symbolic links that lead out of it are refused with "Path is outside the export directory". To get an export out of a container, mount a volume on the export directory (`-v ./export:/export -e EXPORT_DIR=/export`) instead of copying files.
+* Administrator tools are off unless `ADMIN_TOOLS_ENABLED=true`.
+
+### No secrets in git
+
+Keep credentials, real host names and real schema or table names out of the repository: in code, tests, examples, saved queries, annotations and documentation. Pass them as environment variables or secrets at run time (see [Deploy on OpenShift or Kubernetes](#deploy-on-openshift-or-kubernetes)). Examples use placeholders such as `dbhost`, `readonly_user` and `...`, and the tests use H2 with synthetic data only. Files such as `.env`, the export directory and the saved queries directory belong in `.gitignore`.
 
 ### What has been tested
 
@@ -382,7 +434,7 @@ python jsql-mcp/mcptest/mcptest.py raw @jsql-mcp/req/list.json
 
 * `list` shows the tools and their parameters (`--json` for the full definitions).
 * `call` runs one tool. Arguments come from `--args` (JSON) and/or repeated `-a key=value`; exit code 1 if the tool reports an error.
-* `smoke` checks `/health/live` and `/health/ready`, that a `Bearer` authorization is rejected, that the 12 tools exist, that `server_info`, `list_databases`, `list_schemas` and `list_tables` succeed, and that an unknown tool gives an error. Exit code 1 if any check fails.
+* `smoke` checks `/health/live` and `/health/ready`, that a `Bearer` authorization is rejected, that the expected tools exist (the administrator tools are not expected, they exist only with `ADMIN_TOOLS_ENABLED=true`), that `server_info`, `list_databases`, `list_schemas` and `list_tables` succeed, and that an unknown tool gives an error. Exit code 1 if any check fails.
 * `raw` posts a JSON-RPC body (or `@file`) and prints the HTTP status, headers and body. Use `-H 'Name: value'` and `--no-auth` for protocol level tests.
 
 Options before the subcommand: `--url` (`MCP_URL`, default `http://localhost:9080/mcp`), `--user` (`MCP_USER`), `--password` (`MCP_PASSWORD`) and `--timeout`. Without `--user` no `Authorization` header is sent, so the server's default account is used.

@@ -17,6 +17,7 @@ import jsql.core.QueryService.ResultColumn;
 import jsql.core.QueryService.RowCountResult;
 import jsql.core.QueryService.ValueCount;
 import jsql.core.QueryService.Validation;
+import jsql.core.QueryService.TableStats;
 import jsql.core.SchemaInspector.ColumnInfo;
 import jsql.core.SchemaInspector.ForeignKey;
 import jsql.core.SchemaInspector.IndexInfo;
@@ -26,6 +27,9 @@ import jsql.core.SchemaInspector.SchemaRef;
 import jsql.core.SchemaInspector.TableDescription;
 import jsql.core.SchemaInspector.TableInfo;
 import jsql.core.TableRef;
+import jsql.mcp.Operations.HistoryEntry;
+import jsql.mcp.Operations.Running;
+import jsql.mcp.PoolManager.PoolStatus;
 
 /**
  * Converts core results to compact JSON text for the AI client. Null values and empty fields are
@@ -53,8 +57,16 @@ final class ToolJson {
     }
 
     static String tables(ListResult<TableInfo> result) {
+        return tables(result, null);
+    }
+
+    /** @param nextOffset where the next page starts; used only when the list was cut */
+    static String tables(ListResult<TableInfo> result, Integer nextOffset) {
         JsonObjectBuilder b = Json.createObjectBuilder();
         b.add("tables", array(result.items(), ToolJson::tableInfo));
+        if (result.truncated() && nextOffset != null) {
+            b.add("next_offset", nextOffset);
+        }
         return truncated(b, result.truncated());
     }
 
@@ -66,8 +78,12 @@ final class ToolJson {
         JsonObjectBuilder b = Json.createObjectBuilder();
         b.add("table", tableInfo(d.table(), annotations.notes()));
         b.add("columns", array(d.columns(), c -> column(c, annotations.columnNotes().get(c.name()))));
-        b.add("primaryKey", strings(d.primaryKey()));
-        b.add("indexes", array(d.indexes(), ToolJson::index));
+        if (d.primaryKey() != null) {
+            b.add("primaryKey", strings(d.primaryKey()));
+        }
+        if (d.indexes() != null) {
+            b.add("indexes", array(d.indexes(), ToolJson::index));
+        }
         return b.build().toString();
     }
 
@@ -91,7 +107,17 @@ final class ToolJson {
 
     /** Rows as arrays in column order (column names once), SQL NULL as JSON null. */
     static String rows(QueryResult r) {
+        return rows(r, 0);
+    }
+
+    /**
+     * @param effectiveTimeoutSeconds the timeout that was applied after clamping; 0 leaves it out
+     */
+    static String rows(QueryResult r, int effectiveTimeoutSeconds) {
         JsonObjectBuilder b = Json.createObjectBuilder();
+        if (effectiveTimeoutSeconds > 0) {
+            b.add("effectiveTimeoutSeconds", effectiveTimeoutSeconds);
+        }
         if (r.updateCount() != null) {
             b.add("updateCount", r.updateCount());
             if (r.elapsedMs() != null) {
@@ -134,6 +160,85 @@ final class ToolJson {
         b.add("truncated", r.truncated());
         b.add("columns", strings(r.columns()));
         b.add("elapsedMs", r.elapsedMs());
+        return b.build().toString();
+    }
+
+    static String exports(ListResult<ExportFiles.ExportFile> result) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("files", array(result.items(), f -> Json.createObjectBuilder().add("path", f.path())
+                .add("size", f.size()).add("modified", f.modified().toString()).build()));
+        return truncated(b, result.truncated());
+    }
+
+    static String exportChunk(ExportFiles.Chunk c) {
+        return Json.createObjectBuilder().add("path", c.path()).add("offset", c.offset()).add("text", c.text())
+                .add("next_offset", c.nextOffset()).add("eof", c.eof()).add("size", c.size()).build().toString();
+    }
+
+    static String tableStats(TableStats s) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("supported", s.supported());
+        put(b, "hint", s.hint());
+        if (s.rowCount() != null) {
+            b.add("rowCount", s.rowCount());
+        }
+        if (s.columns() != null && !s.columns().isEmpty()) {
+            b.add("columns", array(s.columns(), c -> {
+                JsonObjectBuilder o = Json.createObjectBuilder();
+                o.add("column", c.column());
+                put(o, "distinctValues", c.distinctValues());
+                put(o, "nullsFraction", c.nullsFraction());
+                put(o, "min", c.min());
+                put(o, "max", c.max());
+                return o.build();
+            }));
+        }
+        return b.build().toString();
+    }
+
+    static String pools(List<PoolStatus> pools) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("pools", array(pools, ToolJson::pool));
+        return b.build().toString();
+    }
+
+    static JsonObject pool(PoolStatus p) {
+        return Json.createObjectBuilder().add("connection", p.connection()).add("user", p.user())
+                .add("total", p.total()).add("active", p.active()).add("idle", p.idle()).add("waiting", p.waiting())
+                .add("maxPoolSize", p.maxPoolSize()).add("oldestActiveSeconds", p.oldestActiveSeconds()).build();
+    }
+
+    static String history(List<HistoryEntry> entries) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("history", array(entries, h -> {
+            JsonObjectBuilder o = Json.createObjectBuilder();
+            o.add("time", h.time().toString());
+            put(o, "connection", h.connection());
+            o.add("tool", h.tool());
+            put(o, "sqlHash", h.sqlHash());
+            o.add("state", h.state());
+            o.add("elapsedMs", h.elapsedMs());
+            if (h.rowCount() != null) {
+                o.add("rowCount", h.rowCount());
+            }
+            put(o, "errorType", h.errorType());
+            return o.build();
+        }));
+        return b.build().toString();
+    }
+
+    static String running(List<Running> list) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("queries", array(list, r -> {
+            JsonObjectBuilder o = Json.createObjectBuilder();
+            o.add("query_id", r.queryId());
+            put(o, "connection", r.connection());
+            o.add("tool", r.tool());
+            put(o, "sql", r.sql());
+            o.add("elapsedSeconds", r.elapsedSeconds());
+            o.add("state", r.state());
+            return o.build();
+        }));
         return b.build().toString();
     }
 

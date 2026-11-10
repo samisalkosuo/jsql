@@ -30,9 +30,21 @@ public record QueryLimits(int maxRows, int queryTimeoutSeconds, int maxValueLeng
         }
     }
 
+    /**
+     * The timeout to apply: the configured default when none is asked for, otherwise the asked-for
+     * value cut to {@link #maxQueryTimeoutSeconds()}.
+     *
+     * @throws InvalidRequestException if a timeout is given that is zero or negative
+     */
     public int effectiveTimeout(Integer customTimeoutSeconds) {
-        if (customTimeoutSeconds == null || customTimeoutSeconds <= 0) {
+        if (customTimeoutSeconds == null) {
+            if (queryTimeoutSeconds > 0 && maxQueryTimeoutSeconds > 0) {
+                return Math.min(queryTimeoutSeconds, maxQueryTimeoutSeconds);
+            }
             return queryTimeoutSeconds;
+        }
+        if (customTimeoutSeconds <= 0) {
+            throw new InvalidRequestException("timeout_seconds must be at least 1.");
         }
         if (maxQueryTimeoutSeconds > 0) {
             return Math.min(customTimeoutSeconds, maxQueryTimeoutSeconds);

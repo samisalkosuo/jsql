@@ -73,6 +73,16 @@ public final class QueryService {
     public record ResultColumn(String name, String typeName) {
     }
 
+    public record ColumnStats(String column, String distinctValues, String nullsFraction, String min, String max) {
+    }
+
+    /**
+     * Statistics the database already keeps. {@code supported} is false when the database has no
+     * plain-SQL way to read them; {@code hint} then says what to use instead.
+     */
+    public record TableStats(boolean supported, String hint, Long rowCount, List<ColumnStats> columns) {
+    }
+
     /**
      * @param valid          true if the database accepted the statement
      * @param error          database error message when not valid
@@ -188,12 +198,12 @@ public final class QueryService {
                     hasResultSet = st.execute(sql);
                 } catch (SQLTimeoutException e) {
                     cancelQuietly(st);
-                    throw new InvalidRequestException("Query timed out after " + effectiveTimeout
+                    throw new QueryTimeoutException("Query timed out after " + effectiveTimeout
                             + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
                 } catch (SQLException e) {
                     if (isTimeout(e)) {
                         cancelQuietly(st);
-                        throw new InvalidRequestException("Query timed out after " + effectiveTimeout
+                        throw new QueryTimeoutException("Query timed out after " + effectiveTimeout
                                 + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
                     }
                     throw e;
@@ -289,7 +299,7 @@ public final class QueryService {
                     }
                 } catch (SQLTimeoutException e) {
                     cancelQuietly(st);
-                    throw new InvalidRequestException("Counting rows timed out after " + effectiveTimeout
+                    throw new QueryTimeoutException("Counting rows timed out after " + effectiveTimeout
                             + "s (error_type: timeout). Table may be very large.", e);
                 }
             }
@@ -297,12 +307,65 @@ public final class QueryService {
         });
     }
 
+    /**
+     * Table and column statistics from the database's own statistics, without scanning the table.
+     * Supported for Presto and Trino ({@code SHOW STATS FOR}); other databases give
+     * {@code supported = false}.
+     */
+    public TableStats tableStats(Connection conn, String catalog, String schema, String table,
+            Integer timeoutSeconds) throws SQLException {
+        int timeout = limits.effectiveTimeout(timeoutSeconds);
+        TableRef ref = inspector.resolveTable(conn, catalog, schema, table).table();
+        DatabaseMetaData md = conn.getMetaData();
+        String product = md.getDatabaseProductName() == null ? "" : md.getDatabaseProductName().toLowerCase(Locale.ROOT);
+        if (!product.contains("presto") && !product.contains("trino")) {
+            return new TableStats(false, "Table statistics are not available for " + md.getDatabaseProductName()
+                    + " through plain SQL. Use get_row_count for the number of rows and profile_column for a column.",
+                    null, List.of());
+        }
+        QueryResult r = run(conn, "SHOW STATS FOR " + Dialect.qualifiedName(md, ref), limits.maxRows(), timeout);
+        int nameIdx = r.columns().indexOf("column_name");
+        int distinctIdx = r.columns().indexOf("distinct_values_count");
+        int nullsIdx = r.columns().indexOf("nulls_fraction");
+        int rowsIdx = r.columns().indexOf("row_count");
+        int lowIdx = r.columns().indexOf("low_value");
+        int highIdx = r.columns().indexOf("high_value");
+        Long rowCount = null;
+        List<ColumnStats> columns = new ArrayList<>();
+        for (List<String> row : r.rows()) {
+            if (nameIdx < 0 || row.get(nameIdx) == null) {
+                if (rowsIdx >= 0 && row.get(rowsIdx) != null) {
+                    try {
+                        rowCount = (long) Double.parseDouble(row.get(rowsIdx));
+                    } catch (NumberFormatException e) {
+                        // statistics not known
+                    }
+                }
+            } else {
+                columns.add(new ColumnStats(row.get(nameIdx), cell(row, distinctIdx), cell(row, nullsIdx),
+                        cell(row, lowIdx), cell(row, highIdx)));
+            }
+        }
+        return new TableStats(true, null, rowCount, columns);
+    }
+
+    private static String cell(List<String> row, int index) {
+        return index < 0 ? null : row.get(index);
+    }
+
     /** The first rows of a table or view. {@code rows} is cut to the configured maximum. */
     public QueryResult sampleRows(Connection conn, String catalog, String schema, String table, int rows)
             throws SQLException {
+        return sampleRows(conn, catalog, schema, table, rows, null);
+    }
+
+    /** Like {@link #sampleRows(Connection, String, String, String, int)} with a per-call timeout. */
+    public QueryResult sampleRows(Connection conn, String catalog, String schema, String table, int rows,
+            Integer timeoutSeconds) throws SQLException {
+        int timeout = limits.effectiveTimeout(timeoutSeconds);
         TableRef ref = inspector.resolveTable(conn, catalog, schema, table).table();
         int count = Math.max(1, Math.min(rows, limits.maxRows()));
-        return run(conn, "SELECT * FROM " + Dialect.qualifiedName(conn.getMetaData(), ref), count);
+        return run(conn, "SELECT * FROM " + Dialect.qualifiedName(conn.getMetaData(), ref), count, timeout);
     }
 
     /**
@@ -313,6 +376,13 @@ public final class QueryService {
      */
     public ColumnProfile profileColumn(Connection conn, String catalog, String schema, String table, String column,
             int topValues) throws SQLException {
+        return profileColumn(conn, catalog, schema, table, column, topValues, null);
+    }
+
+    /** Like {@link #profileColumn(Connection, String, String, String, String, int)} with a per-statement timeout. */
+    public ColumnProfile profileColumn(Connection conn, String catalog, String schema, String table, String column,
+            int topValues, Integer timeoutSeconds) throws SQLException {
+        int timeout = limits.effectiveTimeout(timeoutSeconds);
         TableRef ref = inspector.resolveTable(conn, catalog, schema, table).table();
         SchemaInspector.ColumnInfo col = findColumn(inspector.columns(conn, ref), column);
         DatabaseMetaData md = conn.getMetaData();
@@ -320,13 +390,13 @@ public final class QueryService {
         String c = Dialect.quote(md, col.name());
         List<String> notes = new ArrayList<>();
 
-        QueryResult counts = run(conn, "SELECT COUNT(*), COUNT(" + c + ") FROM " + from, 1);
+        QueryResult counts = run(conn, "SELECT COUNT(*), COUNT(" + c + ") FROM " + from, 1, timeout);
         long rowCount = Long.parseLong(counts.rows().get(0).get(0));
         long nonNull = Long.parseLong(counts.rows().get(0).get(1));
 
         Long distinct = null;
         try {
-            QueryResult r = run(conn, "SELECT COUNT(DISTINCT " + c + ") FROM " + from, 1);
+            QueryResult r = run(conn, "SELECT COUNT(DISTINCT " + c + ") FROM " + from, 1, timeout);
             distinct = Long.parseLong(r.rows().get(0).get(0));
         } catch (SQLException e) {
             notes.add("distinct count not available for type " + col.typeName() + ": " + e.getMessage());
@@ -335,7 +405,7 @@ public final class QueryService {
         String min = null;
         String max = null;
         try {
-            QueryResult r = run(conn, "SELECT MIN(" + c + "), MAX(" + c + ") FROM " + from, 1);
+            QueryResult r = run(conn, "SELECT MIN(" + c + "), MAX(" + c + ") FROM " + from, 1, timeout);
             min = r.rows().get(0).get(0);
             max = r.rows().get(0).get(1);
         } catch (SQLException e) {
@@ -346,7 +416,7 @@ public final class QueryService {
         if (topValues > 0) {
             try {
                 QueryResult r = run(conn, "SELECT " + c + ", COUNT(*) FROM " + from + " GROUP BY " + c
-                        + " ORDER BY COUNT(*) DESC", Math.min(topValues, limits.maxRows()));
+                        + " ORDER BY COUNT(*) DESC", Math.min(topValues, limits.maxRows()), timeout);
                 for (List<String> row : r.rows()) {
                     top.add(new ValueCount(row.get(0), Long.parseLong(row.get(1))));
                 }
@@ -417,6 +487,12 @@ public final class QueryService {
      * The plan is returned as rows of text.
      */
     public QueryResult explain(Connection conn, String sql) throws SQLException {
+        return explain(conn, sql, null);
+    }
+
+    /** Like {@link #explain(Connection, String)} with a per-call timeout. */
+    public QueryResult explain(Connection conn, String sql, Integer timeoutSeconds) throws SQLException {
+        int timeout = limits.effectiveTimeout(timeoutSeconds);
         if (readOnly) {
             SqlGuard.requireReadOnly(sql);
         }
@@ -424,17 +500,17 @@ public final class QueryService {
         List<String> steps = Dialect.explainStatements(conn.getMetaData().getDatabaseProductName(), statement);
         for (int i = 0; i < steps.size() - 1; i++) {
             try (Statement st = conn.createStatement()) {
-                configureStatement(st, 1, limits.queryTimeoutSeconds());
+                configureStatement(st, 1, timeout);
                 st.execute(steps.get(i));
             }
         }
-        return run(conn, steps.get(steps.size() - 1), limits.maxRows());
+        return run(conn, steps.get(steps.size() - 1), limits.maxRows(), timeout);
     }
 
     // ---------------------------------------------------------------------------------------
 
-    private QueryResult run(Connection conn, String sql, int rowLimit) throws SQLException {
-        return runStatement(conn, sql, 0, rowLimit, limits.queryTimeoutSeconds());
+    private QueryResult run(Connection conn, String sql, int rowLimit, int timeoutSeconds) throws SQLException {
+        return runStatement(conn, sql, 0, rowLimit, timeoutSeconds);
     }
 
     private QueryResult runStatement(Connection conn, String sql, int offset, int rowLimit, int timeoutSeconds)
@@ -447,12 +523,12 @@ public final class QueryService {
                 hasResultSet = st.execute(sql);
             } catch (SQLTimeoutException e) {
                 cancelQuietly(st);
-                throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                throw new QueryTimeoutException("Query timed out after " + timeoutSeconds
                         + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
             } catch (SQLException e) {
                 if (isTimeout(e)) {
                     cancelQuietly(st);
-                    throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                    throw new QueryTimeoutException("Query timed out after " + timeoutSeconds
                             + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
                 }
                 throw e;
@@ -482,12 +558,12 @@ public final class QueryService {
                 hasResultSet = ps.execute();
             } catch (SQLTimeoutException e) {
                 cancelQuietly(ps);
-                throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                throw new QueryTimeoutException("Query timed out after " + timeoutSeconds
                         + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
             } catch (SQLException e) {
                 if (isTimeout(e)) {
                     cancelQuietly(ps);
-                    throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                    throw new QueryTimeoutException("Query timed out after " + timeoutSeconds
                             + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
                 }
                 throw e;

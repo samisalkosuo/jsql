@@ -22,7 +22,7 @@ public class AuditLog {
         LOG.info("[AUDIT] conn=" + conn + " elapsed=" + elapsedMs + "ms rows=" + rowCount + " sqlHash=" + hash);
     }
 
-    private static String sqlHash(String sql) {
+    static String sqlHash(String sql) {
         if (sql == null) {
             return "none";
         }

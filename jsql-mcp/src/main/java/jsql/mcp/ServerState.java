@@ -24,6 +24,7 @@ public class ServerState {
 
     private volatile McpConfig config;
     private volatile PoolManager pools;
+    private volatile Operations operations;
     private volatile SchemaInspector inspector;
     private volatile QueryService queries;
     private volatile String configProblem;
@@ -57,6 +58,7 @@ public class ServerState {
         inspector = new SchemaInspector(c.limits());
         queries = new QueryService(c.limits(), c.readOnly());
         pools = poolManager;
+        operations = new Operations(c);
         config = c; // last: config() is the "ready" signal
     }
 
@@ -75,6 +77,12 @@ public class ServerState {
     PoolManager pools() {
         config(); // throws if not configured
         return pools;
+    }
+
+    /** Registry, deadlines and history of everything that touches the database. */
+    Operations operations() {
+        config(); // throws if not configured
+        return operations;
     }
 
     /** Metadata queries, configured with the server limits. */
@@ -97,6 +105,10 @@ public class ServerState {
 
     @PreDestroy
     void stop() {
+        Operations o = operations;
+        if (o != null) {
+            o.close();
+        }
         PoolManager p = pools;
         if (p != null) {
             try {

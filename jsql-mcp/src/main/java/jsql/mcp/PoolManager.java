@@ -7,6 +7,7 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.SQLTransientConnectionException;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.HashMap;
 import java.util.List;
@@ -50,6 +51,25 @@ public final class PoolManager implements AutoCloseable {
         T apply(Connection connection) throws SQLException;
     }
 
+    /** Work that also gets a handle to throw its connection away instead of returning it to the pool. */
+    public interface LeasedWork<T> {
+        T apply(Connection connection, Lease lease) throws SQLException;
+    }
+
+    /** The borrowed connection. */
+    public interface Lease {
+        /**
+         * Closes the connection for good (also while it is in use) instead of returning it to the
+         * pool. Used when a statement may still be running on it.
+         */
+        void evict();
+    }
+
+    /** Connection counters of one pool. */
+    public record PoolStatus(String connection, String user, int total, int active, int idle, int waiting,
+            int maxPoolSize, long oldestActiveSeconds) {
+    }
+
     /** All pools are in use by other accounts, so no new account can be served right now. */
     public static class TooManyAccountsException extends RuntimeException {
         private static final long serialVersionUID = 1L;
@@ -61,14 +81,17 @@ public final class PoolManager implements AutoCloseable {
 
     private static final class Entry {
         final String key;
+        final String connectionName;
         final String user;
         final HikariDataSource pool;
+        final ConcurrentHashMap<Object, Long> activeSince = new ConcurrentHashMap<>();
         int leases;
         long lastUsed;
         boolean retired;
 
-        Entry(String key, String user, HikariDataSource pool, long now) {
+        Entry(String key, String connectionName, String user, HikariDataSource pool, long now) {
             this.key = key;
+            this.connectionName = connectionName;
             this.user = user;
             this.pool = pool;
             this.lastUsed = now;
@@ -119,6 +142,12 @@ public final class PoolManager implements AutoCloseable {
 
     public <T> T withConnection(ConnectionConfig connConfig, Credentials credentials, ConnectionWork<T> work)
             throws SQLException {
+        return withConnection(connConfig, credentials, (connection, lease) -> work.apply(connection));
+    }
+
+    /** Like {@link #withConnection(ConnectionConfig, Credentials, ConnectionWork)}, with a {@link Lease}. */
+    public <T> T withConnection(ConnectionConfig connConfig, Credentials credentials, LeasedWork<T> work)
+            throws SQLException {
         if (connConfig == null) {
             connConfig = config.defaultConnection();
         }
@@ -137,11 +166,82 @@ public final class PoolManager implements AutoCloseable {
                 }
                 throw e;
             }
+            Object token = new Object();
+            entry.activeSince.put(token, nanoClock.getAsLong());
             try (connection) {
-                return work.apply(connection);
+                final Connection borrowed = connection;
+                return work.apply(borrowed, () -> evictQuietly(entry, borrowed));
+            } finally {
+                entry.activeSince.remove(token);
             }
         } finally {
             release(entry);
+        }
+    }
+
+    /** Counters of all open pools (one per connection and account). */
+    public List<PoolStatus> status() {
+        return status(null);
+    }
+
+    /** Counters of the open pools of one named connection; all pools if the name is null. */
+    public List<PoolStatus> status(String connectionName) {
+        List<Entry> entries;
+        synchronized (lock) {
+            entries = new ArrayList<>(pools.values());
+        }
+        long now = nanoClock.getAsLong();
+        List<PoolStatus> result = new ArrayList<>();
+        for (Entry e : entries) {
+            if (connectionName != null && !connectionName.equalsIgnoreCase(e.connectionName)) {
+                continue;
+            }
+            var mx = e.pool.getHikariPoolMXBean();
+            if (mx == null) {
+                continue;
+            }
+            long oldest = e.activeSince.values().stream().mapToLong(Long::longValue).min().stream()
+                    .map(since -> now - since).findFirst().orElse(0);
+            result.add(new PoolStatus(e.connectionName, e.user, mx.getTotalConnections(), mx.getActiveConnections(),
+                    mx.getIdleConnections(), mx.getThreadsAwaitingConnection(), config.poolSize(),
+                    TimeUnit.NANOSECONDS.toSeconds(oldest)));
+        }
+        result.sort(Comparator.comparing(PoolStatus::connection).thenComparing(PoolStatus::user));
+        return result;
+    }
+
+    /**
+     * Refreshes the pools of one named connection (all if the name is null).
+     *
+     * @param force false: idle connections are closed now and busy ones when they are returned.
+     *              true: the pools are also dropped, so that the next request opens a new pool; the old
+     *              pool is closed as soon as its last borrowed connection is returned (stop the running
+     *              operations first, see {@link Operations})
+     */
+    public void reset(String connectionName, boolean force) {
+        List<Entry> matching = new ArrayList<>();
+        synchronized (lock) {
+            for (Entry e : pools.values()) {
+                if (connectionName == null || connectionName.equalsIgnoreCase(e.connectionName)) {
+                    matching.add(e);
+                }
+            }
+        }
+        for (Entry e : matching) {
+            if (!force) {
+                e.pool.getHikariPoolMXBean().softEvictConnections();
+                continue;
+            }
+            boolean closeNow;
+            synchronized (lock) {
+                pools.remove(e.key, e);
+                e.retired = true;
+                closeNow = e.leases == 0;
+            }
+            if (closeNow) {
+                closeQuietly(e);
+            }
+            LOG.info("Reset connection pool " + e.pool.getPoolName());
         }
     }
 
@@ -297,12 +397,31 @@ public final class PoolManager implements AutoCloseable {
         hc.setMaximumPoolSize(config.poolSize());
         hc.setMinimumIdle(0);
         hc.setConnectionTimeout(TimeUnit.SECONDS.toMillis(config.connectTimeoutSeconds()));
+        hc.setMaxLifetime(TimeUnit.SECONDS.toMillis(config.maxLifetimeSeconds()));
+        hc.setIdleTimeout(TimeUnit.SECONDS.toMillis(config.idleTimeoutSeconds()));
+        if (config.leakDetectionSeconds() > 0) {
+            hc.setLeakDetectionThreshold(TimeUnit.SECONDS.toMillis(config.leakDetectionSeconds()));
+        }
         hc.setInitializationFailTimeout(-1); // credentials were checked above
         hc.setAutoCommit(true);
 
         HikariDataSource pool = new HikariDataSource(hc);
         LOG.info("Opened connection pool " + hc.getPoolName() + " for user " + credentials.user());
-        return new Entry(key, credentials.user(), pool, nanoClock.getAsLong());
+        return new Entry(key, connConfig.name(), credentials.user(), pool, nanoClock.getAsLong());
+    }
+
+    // Aborts the connection (this also stops a running statement) and takes it out of the pool.
+    private static void evictQuietly(Entry entry, Connection connection) {
+        try {
+            connection.abort(Runnable::run);
+        } catch (SQLException | RuntimeException e) {
+            LOG.log(Level.FINE, "Abort of connection failed", e);
+        }
+        try {
+            entry.pool.evictConnection(connection);
+        } catch (RuntimeException e) {
+            LOG.log(Level.FINE, "Evict of connection failed", e);
+        }
     }
 
     private static void closeQuietly(Entry entry) {

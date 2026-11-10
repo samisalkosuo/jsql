@@ -131,6 +131,28 @@ public class SavedQueriesManager {
         }
     }
 
+    /**
+     * Deletes a saved query.
+     *
+     * @return false if no query with this name exists
+     */
+    public boolean deleteQuery(String name) {
+        validateName(name);
+        Path dir = getQueriesDirectory();
+        if (dir == null) {
+            throw new InvalidRequestException("Saved queries directory is not configured.");
+        }
+        Path file = dir.resolve(name + ".json").normalize();
+        if (!file.startsWith(dir)) {
+            throw new InvalidRequestException("Invalid query name: " + name);
+        }
+        try {
+            return Files.deleteIfExists(file);
+        } catch (Exception e) {
+            throw new InvalidRequestException("Could not delete query '" + name + "': " + e.getMessage(), e);
+        }
+    }
+
     private Path getQueriesDirectory() {
         McpConfig config = state.config();
         String dirName = config.savedQueriesDir();
