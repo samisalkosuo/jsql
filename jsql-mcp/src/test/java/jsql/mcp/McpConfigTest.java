@@ -37,7 +37,7 @@ public class McpConfigTest {
         assertEquals("jdbc:postgresql://h/db", c.jdbcUrl());
         assertNull(c.defaultCredentials());
         assertFalse(c.insecure());
-        assertFalse(c.readOnly());
+        assertTrue(c.readOnly());
         assertEquals(1000, c.limits().maxRows());
         assertEquals(60, c.limits().queryTimeoutSeconds());
         assertEquals(1000, c.limits().maxValueLength());
@@ -72,8 +72,16 @@ public class McpConfigTest {
         McpConfig c = McpConfig.fromEnvironment(env("JSQL_JDBC_URL", "jdbc:h2:mem:x", "JSQL_MAX_ROWS", " ",
                 "JSQL_READ_ONLY", "", "JSQL_USER_NAME", " "));
         assertEquals(1000, c.limits().maxRows());
-        assertFalse(c.readOnly());
+        assertTrue(c.readOnly());
         assertNull(c.defaultCredentials());
+    }
+
+    @Test
+    public void readOnlyCanBeDisabledViaReadOnlyOrJsqlReadOnly() {
+        McpConfig c1 = McpConfig.fromEnvironment(env("JSQL_JDBC_URL", "jdbc:h2:mem:x", "JSQL_READ_ONLY", "false"));
+        assertFalse(c1.readOnly());
+        McpConfig c2 = McpConfig.fromEnvironment(env("JSQL_JDBC_URL", "jdbc:h2:mem:x", "READ_ONLY", "false"));
+        assertFalse(c2.readOnly());
     }
 
     @Test

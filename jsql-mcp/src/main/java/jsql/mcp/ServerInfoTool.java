@@ -3,10 +3,12 @@ package jsql.mcp;
 import java.sql.DatabaseMetaData;
 
 import org.mcpjava.server.tools.Tool;
+import org.mcpjava.server.tools.ToolArg;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.json.Json;
+import jakarta.json.JsonArrayBuilder;
 import jakarta.json.JsonObject;
 import jakarta.json.JsonObjectBuilder;
 import jakarta.servlet.http.HttpServletRequest;
@@ -32,18 +34,33 @@ public class ServerInfoTool {
     @Tool(name = "server_info", title = "Server and database information", description = "Shows which database this server is connected to "
             + "(product, version, driver), which database account is used for this connection, and the limits and "
             + "mode (read-only or not) in effect. Call this first: it also verifies that the credentials work.", annotations = @Tool.Annotations(readOnlyHint = true))
+    public String serverInfo(
+            @ToolArg(name = "connection", description = "Named connection to check. Omit for default.", required = false) String connection) {
+        return info(request != null ? request.getHeader("Authorization") : null, connection);
+    }
+
     public String serverInfo() {
-        return info(request.getHeader("Authorization"));
+        return serverInfo(null);
     }
 
     String info(String authorization) {
-        return db.run(authorization, conn -> {
+        return info(authorization, null);
+    }
+
+    String info(String authorization, String connection) {
+        return db.run(connection, authorization, conn -> {
             DatabaseMetaData md = conn.getMetaData();
             McpConfig config = state.config();
+            ConnectionConfig connConfig = config.connection(connection);
             QueryLimits limits = config.limits();
 
+            JsonArrayBuilder connNames = Json.createArrayBuilder();
+            config.connectionNames().forEach(connNames::add);
+
             JsonObjectBuilder server = Json.createObjectBuilder()
-                    .add("jdbcUrl", config.redactedJdbcUrl())
+                    .add("connectionName", connConfig.name())
+                    .add("connections", connNames)
+                    .add("jdbcUrl", connConfig.redactedJdbcUrl())
                     .add("databaseProduct", nullToEmpty(md.getDatabaseProductName()))
                     .add("databaseVersion", nullToEmpty(md.getDatabaseProductVersion()))
                     .add("driver", nullToEmpty(md.getDriverName()) + " " + nullToEmpty(md.getDriverVersion()))
@@ -51,10 +68,12 @@ public class ServerInfoTool {
                     .add("accountSource", authorization == null || authorization.isBlank()
                             ? "server default account (no Authorization header sent)"
                             : "Authorization header of this request")
-                    .add("readOnlyMode", config.readOnly())
+                    .add("readOnlyMode", connConfig.readOnly())
                     .add("maxRows", limits.maxRows())
                     .add("queryTimeoutSeconds", limits.queryTimeoutSeconds())
-                    .add("maxValueLength", limits.maxValueLength());
+                    .add("maxQueryTimeoutSeconds", limits.maxQueryTimeoutSeconds())
+                    .add("maxValueLength", limits.maxValueLength())
+                    .add("exportDir", config.exportDir());
             JsonObject json = server.build();
             return json.toString();
         });

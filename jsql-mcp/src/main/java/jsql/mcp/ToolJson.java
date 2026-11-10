@@ -11,8 +11,10 @@ import jakarta.json.JsonObjectBuilder;
 import jakarta.json.JsonValue;
 import jsql.core.ListResult;
 import jsql.core.QueryService.ColumnProfile;
+import jsql.core.QueryService.ExportResult;
 import jsql.core.QueryService.QueryResult;
 import jsql.core.QueryService.ResultColumn;
+import jsql.core.QueryService.RowCountResult;
 import jsql.core.QueryService.ValueCount;
 import jsql.core.QueryService.Validation;
 import jsql.core.SchemaInspector.ColumnInfo;
@@ -57,9 +59,13 @@ final class ToolJson {
     }
 
     static String description(TableDescription d) {
+        return description(d, AnnotationsManager.TableAnnotations.EMPTY);
+    }
+
+    static String description(TableDescription d, AnnotationsManager.TableAnnotations annotations) {
         JsonObjectBuilder b = Json.createObjectBuilder();
-        b.add("table", tableInfo(d.table()));
-        b.add("columns", array(d.columns(), ToolJson::column));
+        b.add("table", tableInfo(d.table(), annotations.notes()));
+        b.add("columns", array(d.columns(), c -> column(c, annotations.columnNotes().get(c.name()))));
         b.add("primaryKey", strings(d.primaryKey()));
         b.add("indexes", array(d.indexes(), ToolJson::index));
         return b.build().toString();
@@ -88,9 +94,15 @@ final class ToolJson {
         JsonObjectBuilder b = Json.createObjectBuilder();
         if (r.updateCount() != null) {
             b.add("updateCount", r.updateCount());
+            if (r.elapsedMs() != null) {
+                b.add("elapsedMs", r.elapsedMs());
+            }
             return b.build().toString();
         }
         b.add("columns", strings(r.columns()));
+        if (r.columnTypes() != null && !r.columnTypes().isEmpty()) {
+            b.add("columnTypes", strings(r.columnTypes()));
+        }
         JsonArrayBuilder rows = Json.createArrayBuilder();
         for (List<String> row : r.rows()) {
             JsonArrayBuilder values = Json.createArrayBuilder();
@@ -105,7 +117,91 @@ final class ToolJson {
         }
         b.add("rows", rows);
         b.add("rowCount", r.rows().size());
+        if (r.valueTruncated()) {
+            b.add("valueTruncated", true);
+            b.add("valueTruncatedNote", "Some values were truncated by the server's maxValueLength setting.");
+        }
+        if (r.elapsedMs() != null) {
+            b.add("elapsedMs", r.elapsedMs());
+        }
         return truncated(b, r.truncated());
+    }
+
+    static String export(ExportResult r) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("path", r.path());
+        b.add("rowsWritten", r.rowsWritten());
+        b.add("truncated", r.truncated());
+        b.add("columns", strings(r.columns()));
+        b.add("elapsedMs", r.elapsedMs());
+        return b.build().toString();
+    }
+
+    static String rowCount(RowCountResult r) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("rowCount", r.rowCount());
+        b.add("estimated", r.estimated());
+        return b.build().toString();
+    }
+
+    public record TableLocation(String connection, String catalog, String schema, String table, String type,
+            String remarks) {
+    }
+
+    static String findTable(List<TableLocation> matches) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("tables", array(matches, m -> {
+            JsonObjectBuilder o = Json.createObjectBuilder();
+            put(o, "connection", m.connection());
+            put(o, "catalog", m.catalog());
+            put(o, "schema", m.schema());
+            put(o, "table", m.table());
+            put(o, "type", m.type());
+            put(o, "remarks", m.remarks());
+            return o.build();
+        }));
+        return b.build().toString();
+    }
+
+    static String connections(List<ConnectionConfig> configs) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("connections", array(configs, c -> {
+            JsonObjectBuilder o = Json.createObjectBuilder();
+            o.add("name", c.name());
+            o.add("jdbcUrl", c.redactedJdbcUrl());
+            o.add("readOnly", c.readOnly());
+            o.add("isDefault", c.isDefault());
+            return o.build();
+        }));
+        return b.build().toString();
+    }
+
+    static String savedQueries(List<SavedQueriesManager.SavedQuery> list) {
+        JsonObjectBuilder b = Json.createObjectBuilder();
+        b.add("savedQueries", array(list, q -> {
+            JsonObjectBuilder o = Json.createObjectBuilder();
+            o.add("name", q.name());
+            put(o, "description", q.description());
+            put(o, "sql", q.sql());
+            put(o, "connection", q.connection());
+            if (q.parameters() != null && !q.parameters().isEmpty()) {
+                o.add("parameters", strings(q.parameters()));
+            }
+            return o.build();
+        }));
+        return b.build().toString();
+    }
+
+    static String savedQuery(SavedQueriesManager.SavedQuery q) {
+        JsonObjectBuilder o = Json.createObjectBuilder();
+        o.add("name", q.name());
+        put(o, "description", q.description());
+        put(o, "sql", q.sql());
+        put(o, "connection", q.connection());
+        if (q.parameters() != null && !q.parameters().isEmpty()) {
+            o.add("parameters", strings(q.parameters()));
+        }
+        return o.build().toString();
     }
 
     static String profile(ColumnProfile p) {
@@ -172,9 +268,14 @@ final class ToolJson {
     }
 
     private static JsonObject tableInfo(TableInfo t) {
+        return tableInfo(t, null);
+    }
+
+    private static JsonObject tableInfo(TableInfo t, String notes) {
         JsonObjectBuilder o = tableRef(t.table());
         put(o, "type", t.type());
         put(o, "remarks", t.remarks());
+        put(o, "notes", notes);
         return o.build();
     }
 
@@ -187,6 +288,10 @@ final class ToolJson {
     }
 
     private static JsonObject column(ColumnInfo c) {
+        return column(c, null);
+    }
+
+    private static JsonObject column(ColumnInfo c, String annotationNotes) {
         JsonObjectBuilder o = Json.createObjectBuilder();
         o.add("name", c.name());
         o.add("type", c.typeName() == null ? "" : c.typeName());
@@ -197,6 +302,7 @@ final class ToolJson {
         o.add("nullable", c.nullable());
         put(o, "default", c.defaultValue());
         put(o, "remarks", c.remarks());
+        put(o, "notes", annotationNotes);
         return o.build();
     }
 

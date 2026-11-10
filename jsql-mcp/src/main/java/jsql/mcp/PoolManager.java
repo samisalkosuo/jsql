@@ -114,7 +114,15 @@ public final class PoolManager implements AutoCloseable {
      * @throws TooManyAccountsException     the pool limit is reached and all pools are in use
      */
     public <T> T withConnection(Credentials credentials, ConnectionWork<T> work) throws SQLException {
-        Entry entry = lease(credentials);
+        return withConnection(config.defaultConnection(), credentials, work);
+    }
+
+    public <T> T withConnection(ConnectionConfig connConfig, Credentials credentials, ConnectionWork<T> work)
+            throws SQLException {
+        if (connConfig == null) {
+            connConfig = config.defaultConnection();
+        }
+        Entry entry = lease(connConfig, credentials);
         try {
             Connection connection;
             try {
@@ -180,8 +188,8 @@ public final class PoolManager implements AutoCloseable {
 
     // ---------------------------------------------------------------------------------------
 
-    private Entry lease(Credentials credentials) throws SQLException {
-        String key = keyOf(credentials);
+    private Entry lease(ConnectionConfig connConfig, Credentials credentials) throws SQLException {
+        String key = keyOf(connConfig, credentials);
         Entry existing = leaseExisting(key);
         if (existing != null) {
             return existing;
@@ -194,7 +202,7 @@ public final class PoolManager implements AutoCloseable {
                 if (existing != null) {
                     return existing;
                 }
-                Entry created = createEntry(key, credentials);
+                Entry created = createEntry(key, connConfig, credentials);
                 List<Entry> toClose = new ArrayList<>();
                 try {
                     synchronized (lock) {
@@ -268,17 +276,17 @@ public final class PoolManager implements AutoCloseable {
         }
     }
 
-    private Entry createEntry(String key, Credentials credentials) throws SQLException {
-        ConnectionSettings settings = new ConnectionSettings(config.jdbcUrl(), credentials.user(),
-                credentials.password(), config.insecure());
+    private Entry createEntry(String key, ConnectionConfig connConfig, Credentials credentials) throws SQLException {
+        ConnectionSettings settings = new ConnectionSettings(connConfig.jdbcUrl(), credentials.user(),
+                credentials.password(), connConfig.insecure());
 
         // Check the credentials with a plain connection: fast, and the exception is the driver's own.
         settings.connect(warnings).close();
 
         Properties driverProperties = settings.toProperties(warnings);
         HikariConfig hc = new HikariConfig();
-        hc.setPoolName("jsql-pool-" + poolSequence.incrementAndGet());
-        hc.setJdbcUrl(config.jdbcUrl());
+        hc.setPoolName("jsql-pool-" + connConfig.name() + "-" + poolSequence.incrementAndGet());
+        hc.setJdbcUrl(connConfig.jdbcUrl());
         hc.setUsername(credentials.user());
         hc.setPassword(credentials.password());
         for (String name : driverProperties.stringPropertyNames()) {
@@ -308,8 +316,14 @@ public final class PoolManager implements AutoCloseable {
 
     // The key identifies the account without keeping the password in a map key.
     static String keyOf(Credentials credentials) {
+        return keyOf(null, credentials);
+    }
+
+    static String keyOf(ConnectionConfig connConfig, Credentials credentials) {
+        String connPrefix = (connConfig == null ? "default" : connConfig.name()) + ":";
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            digest.update(connPrefix.getBytes(StandardCharsets.UTF_8));
             digest.update(credentials.user().getBytes(StandardCharsets.UTF_8));
             digest.update((byte) 0);
             digest.update(credentials.password().getBytes(StandardCharsets.UTF_8));

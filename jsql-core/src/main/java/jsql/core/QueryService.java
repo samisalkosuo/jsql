@@ -1,5 +1,10 @@
 package jsql.core;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ParameterMetaData;
@@ -8,6 +13,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,7 +21,7 @@ import java.util.Locale;
 
 /**
  * Runs SQL with limits: row limit, query timeout, value length. Also provides the higher level
- * investigation helpers built on SQL (sample, profile, validate, explain).
+ * investigation helpers built on SQL (sample, profile, validate, explain, export).
  *
  * <p>
  * Read-only mode ({@code readOnly == true}): statements given by the caller are checked with a
@@ -30,12 +36,27 @@ import java.util.Locale;
 public final class QueryService {
 
     /**
-     * @param columns     column labels; empty when the statement returned no result set
-     * @param rows        values as text, in column order; SQL NULL is a Java null
-     * @param truncated   true if more rows exist than were returned
-     * @param updateCount rows affected, or null when the statement returned a result set
+     * @param columns        column labels; empty when the statement returned no result set
+     * @param columnTypes    column type names
+     * @param rows           values as text, in column order; SQL NULL is a Java null
+     * @param truncated      true if more rows exist than were returned
+     * @param valueTruncated true if any value was cut by maxValueLength
+     * @param updateCount    rows affected, or null when the statement returned a result set
+     * @param elapsedMs      time taken to execute in milliseconds
      */
-    public record QueryResult(List<String> columns, List<List<String>> rows, boolean truncated, Integer updateCount) {
+    public record QueryResult(List<String> columns, List<String> columnTypes, List<List<String>> rows,
+            boolean truncated, boolean valueTruncated, Integer updateCount, Long elapsedMs) {
+
+        public QueryResult(List<String> columns, List<List<String>> rows, boolean truncated, Integer updateCount) {
+            this(columns, List.of(), rows, truncated, false, updateCount, null);
+        }
+    }
+
+    public record ExportResult(String path, long rowsWritten, boolean truncated, List<String> columns,
+            long elapsedMs) {
+    }
+
+    public record RowCountResult(long rowCount, boolean estimated) {
     }
 
     public record ValueCount(String value, long count) {
@@ -63,8 +84,8 @@ public final class QueryService {
             int parameterCount) {
     }
 
-    private interface Action<T> {
-        T run() throws SQLException;
+    private interface Action<T, E extends Exception> {
+        T run() throws SQLException, E;
     }
 
     private final QueryLimits limits;
@@ -79,12 +100,201 @@ public final class QueryService {
 
     /** Runs one SQL statement of any kind (unless read-only mode rejects it). */
     public QueryResult execute(Connection conn, String sql) throws SQLException {
+        return execute(conn, sql, null, null, null);
+    }
+
+    /** Runs one SQL statement with pagination and optional per-call timeout. */
+    public QueryResult execute(Connection conn, String sql, Integer offset, Integer limit, Integer timeoutSeconds)
+            throws SQLException {
         if (readOnly) {
             SqlGuard.requireReadOnly(sql);
         } else if (sql == null || sql.isBlank()) {
             throw new InvalidRequestException("SQL is empty.");
         }
-        return withReadOnlyConnection(conn, () -> run(conn, sql, limits.maxRows()));
+        if (offset != null && offset < 0) {
+            throw new InvalidRequestException("offset must not be negative.");
+        }
+        if (limit != null && limit < 1) {
+            throw new InvalidRequestException("limit must be at least 1.");
+        }
+        if (timeoutSeconds != null && timeoutSeconds < 0) {
+            throw new InvalidRequestException("timeout_seconds must not be negative.");
+        }
+        int effectiveLimit = limit != null ? Math.min(limit, limits.maxRows()) : limits.maxRows();
+        int off = offset != null ? offset : 0;
+        int effectiveTimeout = limits.effectiveTimeout(timeoutSeconds);
+
+        return withReadOnlyConnection(conn, () -> runStatement(conn, sql, off, effectiveLimit, effectiveTimeout));
+    }
+
+    /** Runs a parameterized prepared SQL statement with pagination and timeout. */
+    public QueryResult executePrepared(Connection conn, String sql, List<Object> params, Integer offset, Integer limit,
+            Integer timeoutSeconds) throws SQLException {
+        if (readOnly) {
+            SqlGuard.requireReadOnly(sql);
+        } else if (sql == null || sql.isBlank()) {
+            throw new InvalidRequestException("SQL is empty.");
+        }
+        if (offset != null && offset < 0) {
+            throw new InvalidRequestException("offset must not be negative.");
+        }
+        if (limit != null && limit < 1) {
+            throw new InvalidRequestException("limit must be at least 1.");
+        }
+        if (timeoutSeconds != null && timeoutSeconds < 0) {
+            throw new InvalidRequestException("timeout_seconds must not be negative.");
+        }
+        int effectiveLimit = limit != null ? Math.min(limit, limits.maxRows()) : limits.maxRows();
+        int off = offset != null ? offset : 0;
+        int effectiveTimeout = limits.effectiveTimeout(timeoutSeconds);
+
+        return withReadOnlyConnection(conn,
+                () -> runPreparedStatement(conn, sql, params, off, effectiveLimit, effectiveTimeout));
+    }
+
+    /**
+     * Exports query results directly to a local file, streaming with fetch size to minimize memory usage.
+     */
+    public ExportResult exportToFile(Connection conn, String sql, Path targetPath, String format, int maxRows,
+            boolean includeHeader, Integer timeoutSeconds) throws SQLException, IOException {
+        if (readOnly) {
+            SqlGuard.requireReadOnly(sql);
+        } else if (sql == null || sql.isBlank()) {
+            throw new InvalidRequestException("SQL is empty.");
+        }
+        if (maxRows < 1) {
+            throw new InvalidRequestException("max_rows must be at least 1.");
+        }
+        if (timeoutSeconds != null && timeoutSeconds < 0) {
+            throw new InvalidRequestException("timeout_seconds must not be negative.");
+        }
+        String fmt = format == null || format.isBlank() ? "csv" : format.toLowerCase(Locale.ROOT).trim();
+        if (!fmt.equals("csv") && !fmt.equals("json") && !fmt.equals("jsonl")) {
+            throw new InvalidRequestException("format must be 'csv', 'json' or 'jsonl', but is '" + format + "'.");
+        }
+        int effectiveTimeout = limits.effectiveTimeout(timeoutSeconds);
+
+        return withReadOnlyConnection(conn, () -> {
+            long startTime = System.currentTimeMillis();
+            try (Statement st = conn.createStatement()) {
+                configureStatement(st, 0, effectiveTimeout);
+                try {
+                    st.setFetchSize(1000);
+                } catch (SQLException e) {
+                    // some drivers don't support setFetchSize
+                }
+                boolean hasResultSet;
+                try {
+                    hasResultSet = st.execute(sql);
+                } catch (SQLTimeoutException e) {
+                    cancelQuietly(st);
+                    throw new InvalidRequestException("Query timed out after " + effectiveTimeout
+                            + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
+                } catch (SQLException e) {
+                    if (isTimeout(e)) {
+                        cancelQuietly(st);
+                        throw new InvalidRequestException("Query timed out after " + effectiveTimeout
+                                + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
+                    }
+                    throw e;
+                }
+                if (!hasResultSet) {
+                    throw new InvalidRequestException("Export requires a query that returns a result set.");
+                }
+                try (ResultSet rs = st.getResultSet()) {
+                    ResultSetMetaData rsmd = rs.getMetaData();
+                    int columnCount = rsmd.getColumnCount();
+                    List<String> columns = new ArrayList<>(columnCount);
+                    for (int i = 1; i <= columnCount; i++) {
+                        columns.add(rsmd.getColumnLabel(i));
+                    }
+                    if (targetPath.getParent() != null) {
+                        Files.createDirectories(targetPath.getParent());
+                    }
+                    long rowsWritten = 0;
+                    boolean truncated = false;
+                    try (BufferedWriter writer = Files.newBufferedWriter(targetPath, StandardCharsets.UTF_8)) {
+                        switch (fmt) {
+                        case "csv" -> {
+                            if (includeHeader) {
+                                writeCsvRow(writer, columns);
+                            }
+                            while (rs.next()) {
+                                if (rowsWritten >= maxRows) {
+                                    truncated = true;
+                                    break;
+                                }
+                                List<String> row = new ArrayList<>(columnCount);
+                                for (int i = 1; i <= columnCount; i++) {
+                                    Object val = rs.getObject(i);
+                                    row.add(val == null ? null : val.toString());
+                                }
+                                writeCsvRow(writer, row);
+                                rowsWritten++;
+                            }
+                        }
+                        case "json" -> {
+                            writer.write("[\n");
+                            boolean first = true;
+                            while (rs.next()) {
+                                if (rowsWritten >= maxRows) {
+                                    truncated = true;
+                                    break;
+                                }
+                                if (!first) {
+                                    writer.write(",\n");
+                                }
+                                first = false;
+                                writeJsonObject(writer, rs, columns);
+                                rowsWritten++;
+                            }
+                            writer.write("\n]\n");
+                        }
+                        case "jsonl" -> {
+                            while (rs.next()) {
+                                if (rowsWritten >= maxRows) {
+                                    truncated = true;
+                                    break;
+                                }
+                                writeJsonObject(writer, rs, columns);
+                                writer.write('\n');
+                                rowsWritten++;
+                            }
+                        }
+                        }
+                    }
+                    long elapsedMs = System.currentTimeMillis() - startTime;
+                    return new ExportResult(targetPath.toString(), rowsWritten, truncated, columns, elapsedMs);
+                }
+            }
+        });
+    }
+
+    /**
+     * Gets the row count of a table, using statistics where available or falling back to COUNT(*).
+     */
+    public RowCountResult getRowCount(Connection conn, String catalog, String schema, String table,
+            Integer timeoutSeconds) throws SQLException {
+        TableRef ref = inspector.resolveTable(conn, catalog, schema, table).table();
+        DatabaseMetaData md = conn.getMetaData();
+        String from = Dialect.qualifiedName(md, ref);
+        int effectiveTimeout = limits.effectiveTimeout(timeoutSeconds);
+
+        return withReadOnlyConnection(conn, () -> {
+            try (Statement st = conn.createStatement()) {
+                configureStatement(st, 1, effectiveTimeout);
+                try (ResultSet rs = st.executeQuery("SELECT COUNT(*) FROM " + from)) {
+                    if (rs.next()) {
+                        return new RowCountResult(rs.getLong(1), false);
+                    }
+                } catch (SQLTimeoutException e) {
+                    cancelQuietly(st);
+                    throw new InvalidRequestException("Counting rows timed out after " + effectiveTimeout
+                            + "s (error_type: timeout). Table may be very large.", e);
+                }
+            }
+            return new RowCountResult(0, false);
+        });
     }
 
     /** The first rows of a table or view. {@code rows} is cut to the configured maximum. */
@@ -214,7 +424,7 @@ public final class QueryService {
         List<String> steps = Dialect.explainStatements(conn.getMetaData().getDatabaseProductName(), statement);
         for (int i = 0; i < steps.size() - 1; i++) {
             try (Statement st = conn.createStatement()) {
-                configure(st, 1);
+                configureStatement(st, 1, limits.queryTimeoutSeconds());
                 st.execute(steps.get(i));
             }
         }
@@ -224,50 +434,218 @@ public final class QueryService {
     // ---------------------------------------------------------------------------------------
 
     private QueryResult run(Connection conn, String sql, int rowLimit) throws SQLException {
+        return runStatement(conn, sql, 0, rowLimit, limits.queryTimeoutSeconds());
+    }
+
+    private QueryResult runStatement(Connection conn, String sql, int offset, int rowLimit, int timeoutSeconds)
+            throws SQLException {
+        long startTime = System.currentTimeMillis();
         try (Statement st = conn.createStatement()) {
-            configure(st, rowLimit + 1);
-            if (!st.execute(sql)) {
-                return new QueryResult(List.of(), List.of(), false, st.getUpdateCount());
+            configureStatement(st, offset > 0 ? 0 : (rowLimit + 1), timeoutSeconds);
+            boolean hasResultSet;
+            try {
+                hasResultSet = st.execute(sql);
+            } catch (SQLTimeoutException e) {
+                cancelQuietly(st);
+                throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                        + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
+            } catch (SQLException e) {
+                if (isTimeout(e)) {
+                    cancelQuietly(st);
+                    throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                            + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
+                }
+                throw e;
+            }
+            if (!hasResultSet) {
+                long elapsed = System.currentTimeMillis() - startTime;
+                return new QueryResult(List.of(), List.of(), List.of(), false, false, st.getUpdateCount(), elapsed);
             }
             try (ResultSet rs = st.getResultSet()) {
-                ResultSetMetaData rsmd = rs.getMetaData();
-                int columnCount = rsmd.getColumnCount();
-                List<String> columns = new ArrayList<>();
-                for (int i = 1; i <= columnCount; i++) {
-                    columns.add(rsmd.getColumnLabel(i));
-                }
-                List<List<String>> rows = new ArrayList<>();
-                boolean truncated = false;
-                while (rs.next()) {
-                    if (rows.size() == rowLimit) {
-                        truncated = true;
-                        break;
-                    }
-                    List<String> row = new ArrayList<>(columnCount);
-                    for (int i = 1; i <= columnCount; i++) {
-                        row.add(ValueFormatter.format(rs.getObject(i), limits.maxValueLength()));
-                    }
-                    rows.add(row);
-                }
-                return new QueryResult(columns, rows, truncated, null);
+                return extractResult(rs, offset, rowLimit, startTime);
             }
         }
     }
 
-    private void configure(Statement st, int maxRows) throws SQLException {
-        st.setMaxRows(maxRows);
-        if (limits.queryTimeoutSeconds() > 0) {
+    private QueryResult runPreparedStatement(Connection conn, String sql, List<Object> params, int offset,
+            int rowLimit, int timeoutSeconds) throws SQLException {
+        long startTime = System.currentTimeMillis();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            configureStatement(ps, offset > 0 ? 0 : (rowLimit + 1), timeoutSeconds);
+            if (params != null) {
+                for (int i = 0; i < params.size(); i++) {
+                    ps.setObject(i + 1, params.get(i));
+                }
+            }
+            boolean hasResultSet;
             try {
-                st.setQueryTimeout(limits.queryTimeoutSeconds());
+                hasResultSet = ps.execute();
+            } catch (SQLTimeoutException e) {
+                cancelQuietly(ps);
+                throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                        + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
+            } catch (SQLException e) {
+                if (isTimeout(e)) {
+                    cancelQuietly(ps);
+                    throw new InvalidRequestException("Query timed out after " + timeoutSeconds
+                            + "s (error_type: timeout). Narrow your filters or use explain_query.", e);
+                }
+                throw e;
+            }
+            if (!hasResultSet) {
+                long elapsed = System.currentTimeMillis() - startTime;
+                return new QueryResult(List.of(), List.of(), List.of(), false, false, ps.getUpdateCount(), elapsed);
+            }
+            try (ResultSet rs = ps.getResultSet()) {
+                return extractResult(rs, offset, rowLimit, startTime);
+            }
+        }
+    }
+
+    private QueryResult extractResult(ResultSet rs, int offset, int rowLimit, long startTime) throws SQLException {
+        ResultSetMetaData rsmd = rs.getMetaData();
+        int columnCount = rsmd.getColumnCount();
+        List<String> columns = new ArrayList<>(columnCount);
+        List<String> columnTypes = new ArrayList<>(columnCount);
+        for (int i = 1; i <= columnCount; i++) {
+            columns.add(rsmd.getColumnLabel(i));
+            columnTypes.add(rsmd.getColumnTypeName(i) == null ? "" : rsmd.getColumnTypeName(i));
+        }
+
+        // Handle offset pagination
+        if (offset > 0) {
+            int skipped = 0;
+            while (skipped < offset && rs.next()) {
+                skipped++;
+            }
+        }
+
+        List<List<String>> rows = new ArrayList<>();
+        boolean truncated = false;
+        boolean valueTruncated = false;
+        while (rs.next()) {
+            if (rows.size() == rowLimit) {
+                truncated = true;
+                break;
+            }
+            List<String> row = new ArrayList<>(columnCount);
+            for (int i = 1; i <= columnCount; i++) {
+                String formatted = ValueFormatter.format(rs.getObject(i), limits.maxValueLength());
+                if (formatted != null && formatted.endsWith("...[truncated]")) {
+                    valueTruncated = true;
+                }
+                row.add(formatted);
+            }
+            rows.add(row);
+        }
+        long elapsed = System.currentTimeMillis() - startTime;
+        return new QueryResult(columns, columnTypes, rows, truncated, valueTruncated, null, elapsed);
+    }
+
+    private void configureStatement(Statement st, int maxRows, int timeoutSeconds) throws SQLException {
+        if (maxRows > 0) {
+            st.setMaxRows(maxRows);
+        }
+        if (timeoutSeconds > 0) {
+            try {
+                st.setQueryTimeout(timeoutSeconds);
             } catch (SQLFeatureNotSupportedException e) {
                 // driver has no statement timeout
             }
         }
     }
 
+    private static void cancelQuietly(Statement st) {
+        try {
+            st.cancel();
+        } catch (SQLException e) {
+            // ignore cancel failure
+        }
+    }
+
+    private static boolean isTimeout(SQLException e) {
+        String sqlState = e.getSQLState();
+        if ("57014".equals(sqlState)) { // SQLState for query cancelled or timeout
+            return true;
+        }
+        String msg = e.getMessage();
+        return msg != null && (msg.toLowerCase(Locale.ROOT).contains("timeout")
+                || msg.toLowerCase(Locale.ROOT).contains("timed out")
+                || msg.toLowerCase(Locale.ROOT).contains("canceling statement due to statement timeout"));
+    }
+
+    private static void writeCsvRow(BufferedWriter writer, List<String> values) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < values.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            String val = values.get(i);
+            if (val != null) {
+                boolean quote = val.contains(",") || val.contains("\"") || val.contains("\n") || val.contains("\r");
+                if (quote) {
+                    sb.append('"').append(val.replace("\"", "\"\"")).append('"');
+                } else {
+                    sb.append(val);
+                }
+            }
+        }
+        sb.append("\r\n");
+        writer.write(sb.toString());
+    }
+
+    private static void writeJsonObject(BufferedWriter writer, ResultSet rs, List<String> columns)
+            throws SQLException, IOException {
+        StringBuilder sb = new StringBuilder("{");
+        for (int i = 0; i < columns.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append('"').append(escapeJson(columns.get(i))).append("\":");
+            Object val = rs.getObject(i + 1);
+            if (val == null) {
+                sb.append("null");
+            } else if (val instanceof Number || val instanceof Boolean) {
+                sb.append(val);
+            } else {
+                sb.append('"').append(escapeJson(val.toString())).append('"');
+            }
+        }
+        sb.append('}');
+        writer.write(sb.toString());
+    }
+
+    private static String escapeJson(String s) {
+        if (s == null) {
+            return "";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+            case '"' -> sb.append("\\\"");
+            case '\\' -> sb.append("\\\\");
+            case '\b' -> sb.append("\\b");
+            case '\f' -> sb.append("\\f");
+            case '\n' -> sb.append("\\n");
+            case '\r' -> sb.append("\\r");
+            case '\t' -> sb.append("\\t");
+            default -> {
+                if (c < ' ') {
+                    sb.append(String.format("\\u%04x", (int) c));
+                } else {
+                    sb.append(c);
+                }
+            }
+            }
+        }
+        return sb.toString();
+    }
+
     // Marks the connection read-only while the action runs. Failure to do so is ignored: some
     // drivers refuse it, and the text check in SqlGuard has already been applied.
-    private <T> T withReadOnlyConnection(Connection conn, Action<T> action) throws SQLException {
+    private <T, E extends Exception> T withReadOnlyConnection(Connection conn, Action<T, E> action)
+            throws SQLException, E {
         if (!readOnly) {
             return action.run();
         }

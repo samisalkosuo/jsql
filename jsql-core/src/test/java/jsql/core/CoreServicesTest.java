@@ -447,4 +447,75 @@ public class CoreServicesTest {
         assertEquals(2, Dialect.explainStatements("Oracle", "select 1 from dual").size());
         assertEquals(List.of("EXPLAIN select 1"), Dialect.explainStatements("PostgreSQL", "select 1"));
     }
+
+    @Test
+    public void executeWithPaginationOffsetAndLimit() throws Exception {
+        QueryResult r = query.execute(conn, "select id, name from customers order by id", 1, 1, 10);
+        assertEquals(1, r.rows().size());
+        assertEquals("2", r.rows().get(0).get(0));
+        assertEquals("Bob", r.rows().get(0).get(1));
+        assertTrue(r.truncated());
+        assertEquals(List.of("ID", "NAME"), r.columns());
+        assertEquals(List.of("INTEGER", "CHARACTER VARYING"), r.columnTypes());
+        assertNotNull(r.elapsedMs());
+    }
+
+    @Test
+    public void exportToCsvAndJsonAndJsonl() throws Exception {
+        java.nio.file.Path tempDir = java.nio.file.Files.createTempDirectory("jsql-export-test");
+        try {
+            java.nio.file.Path csvPath = tempDir.resolve("out.csv");
+            QueryService.ExportResult csvResult = query.exportToFile(conn,
+                    "select id, name, email from customers order by id", csvPath, "csv", 100, true, 10);
+            assertEquals(3, csvResult.rowsWritten());
+            assertFalse(csvResult.truncated());
+            String csvText = java.nio.file.Files.readString(csvPath);
+            assertTrue(csvText.contains("ID,NAME,EMAIL"));
+            assertTrue(csvText.contains("1,Ann,ann@x.com"));
+
+            java.nio.file.Path jsonPath = tempDir.resolve("out.json");
+            QueryService.ExportResult jsonResult = query.exportToFile(conn,
+                    "select id, name from customers order by id", jsonPath, "json", 2, false, 10);
+            assertEquals(2, jsonResult.rowsWritten());
+            assertTrue(jsonResult.truncated());
+            String jsonText = java.nio.file.Files.readString(jsonPath);
+            assertTrue(jsonText.startsWith("[\n{"));
+
+            java.nio.file.Path jsonlPath = tempDir.resolve("out.jsonl");
+            QueryService.ExportResult jsonlResult = query.exportToFile(conn,
+                    "select id, name from customers order by id", jsonlPath, "jsonl", 100, false, 10);
+            assertEquals(3, jsonlResult.rowsWritten());
+            String jsonlText = java.nio.file.Files.readString(jsonlPath);
+            assertEquals(3, jsonlText.trim().split("\n").length);
+        } finally {
+            // Clean up
+            try (java.util.stream.Stream<java.nio.file.Path> stream = java.nio.file.Files.walk(tempDir)) {
+                stream.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
+                    try {
+                        java.nio.file.Files.deleteIfExists(p);
+                    } catch (Exception ignore) {
+                    }
+                });
+            }
+        }
+    }
+
+    @Test
+    public void getRowCountReturnsCount() throws Exception {
+        QueryService.RowCountResult rc = query.getRowCount(conn, null, "PUBLIC", "CUSTOMERS", 10);
+        assertEquals(3, rc.rowCount());
+        assertFalse(rc.estimated());
+    }
+
+    @Test
+    public void namedSqlParsesAndBinds() throws Exception {
+        NamedSql ns = NamedSql.parse("select * from customers where name = :name and id > :min_id");
+        assertEquals("select * from customers where name = ? and id > ?", ns.sql());
+        assertEquals(List.of("name", "min_id"), ns.parameterNames());
+        List<Object> values = ns.bindValues(java.util.Map.of("name", "Bob", "min_id", 1));
+        assertEquals(List.of("Bob", 1), values);
+
+        QueryResult r = query.executePrepared(conn, ns.sql(), values, null, null, null);
+        assertEquals(2, r.rows().size());
+    }
 }

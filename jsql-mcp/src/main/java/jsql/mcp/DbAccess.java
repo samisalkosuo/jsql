@@ -31,10 +31,15 @@ public class DbAccess {
      * @param work          what to do with the connection
      */
     public <T> T run(String authorization, ConnectionWork<T> work) {
+        return run(null, authorization, work);
+    }
+
+    public <T> T run(String connectionName, String authorization, ConnectionWork<T> work) {
         try {
             McpConfig config = state.config();
-            Credentials credentials = Credentials.resolve(authorization, config.defaultCredentials());
-            return state.pools().withConnection(credentials, work);
+            ConnectionConfig connConfig = config.connection(connectionName);
+            Credentials credentials = Credentials.resolve(authorization, connConfig.defaultCredentials());
+            return state.pools().withConnection(connConfig, credentials, work);
         } catch (InvalidRequestException | CredentialsException | TooManyAccountsException e) {
             LOG.warning("Tool call rejected: " + e.getMessage());
             throw new ToolCallException(e.getMessage());
